@@ -1,0 +1,22 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/block-effort-estimate.sh"
+          },
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/block-unexplained-hedge.sh"
+          },
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/block-question-as-disagreement.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
