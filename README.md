@@ -1,6 +1,6 @@
 # claude-code-hooks
 
-Claude Code hooks that block specific patterns: three Stop hooks for bad outputs (effort estimates, unexplained hedges, questions-framed-as-disagreement) and one PreToolUse hook for bad writes (to project memory files).
+Claude Code hooks. Three Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question. One PreToolUse hook blocks writes targeting project memory files.
 
 This is a personal tool, put on GitHub in case it helps someone running similar configurations. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
 
@@ -8,7 +8,7 @@ This is a personal tool, put on GitHub in case it helps someone running similar 
 
 You'll get value from this if **all** of the following are true:
 
-- You're using **Claude Code** and want to customize what its assistant turns / tool calls are allowed to contain.
+- You're using **Claude Code** and want it to block specific patterns in the assistant's turns and tool calls.
 - For the Stop hooks: you're OK with **Anthropic API charges** for the Haiku second-stage classifications (one small Haiku call per Stop event when the regex pre-filter matches — usually a tiny fraction of turns).
 - You're comfortable with **bash + jq + curl + perl** in your hook scripts and editing `~/.claude/settings.json` by hand.
 
@@ -22,13 +22,13 @@ You will *not* get value from this if:
 
 ### Stop hooks (regex + Haiku two-stage)
 
-These run after each assistant turn. Each one runs a cheap regex pre-filter against the last assistant message; if it matches, a windowed snippet goes to Claude Haiku for disambiguation; if Haiku confirms the bad pattern, the assistant's turn is blocked with a corrective `reason`.
+These run after each assistant turn. Each one runs a cheap regex pre-filter against the last assistant message; if it matches, a windowed snippet goes to Claude Haiku for disambiguation; if Haiku confirms the targeted pattern, the turn is blocked with a `reason` returned to the assistant.
 
-- **`block-effort-estimate.sh`** — catches phrasings like "this'll take a day", "maybe a few hours", "weeks not months", "a couple of weeks". Effort estimates from an LLM are pattern-matched from training data, not measurements of anything the assistant will actually do. The block message asks the assistant to rephrase without putting a number on duration.
+- **`block-effort-estimate.sh`** — catches phrasings like "this'll take a day", "maybe a few hours", "weeks not months", "a couple of weeks". An effort estimate from an LLM names no work that will be done. It is pattern-matched from training data, where humans wrote estimates of work they were doing. The block message asks the assistant to rewrite without one.
 
-- **`block-unexplained-hedge.sh`** — catches "I'm not sure", "I might be wrong", "this could be off" when the assistant doesn't say what the underlying concern is. The block message asks the assistant to either drop the hedge or explain what it's hedging about. Substantive hedges (where the concern is named) pass through; social/habitual hedges get blocked.
+- **`block-unexplained-hedge.sh`** — catches "I'm not sure", "I might be wrong", "this could be off" when the assistant doesn't name the underlying concern. The block message asks the assistant to explain the concern rather than remove the hedge. Substantive hedges (where the concern is named) pass through; social/habitual hedges get blocked.
 
-- **`block-question-as-disagreement.sh`** — catches "I notice X — was that intended?" / "Did you mean to Y?" / "Is that on purpose?" when the assistant is using a question to soften a structural disagreement. The block message asks the assistant to state the disagreement directly. Genuine information-gathering questions pass through; disagreements wearing question's clothes get blocked.
+- **`block-question-as-disagreement.sh`** — catches "I notice X — was that intended?" / "Did you mean to Y?" / "Is that on purpose?" when the assistant frames a structural disagreement as a question. The block message asks the assistant to state the disagreement directly. Genuine information-gathering questions pass through; disagreement framed as a question gets blocked.
 
 ### PreToolUse hooks (path-based)
 
@@ -44,10 +44,10 @@ Each Stop hook follows the same shape:
 2. Strip backtick-delimited spans (so docs that quote the hook's own trigger patterns don't fire the hook on itself).
 3. Run a **cheap regex pre-filter** against the last turn. If nothing matches, exit silently.
 4. If the regex matches, extract a **±800-char window** of context around the match.
-5. Send the window to **Claude Haiku 4.5** with a classification prompt that distinguishes the bad pattern from a benign look-alike (effort vs projection; substantive vs social hedge; genuine question vs disagreement).
-6. If Haiku classifies as the bad pattern, emit a `block` decision with a corrective `reason`.
+5. Send the window to **Claude Haiku 4.5** with a classification prompt that distinguishes the targeted pattern from the look-alike (effort vs projection; substantive vs social hedge; genuine question vs disagreement-framed-as-question).
+6. If Haiku classifies as the targeted pattern, emit a `block` decision with a `reason`.
 
-The two-stage design keeps API cost down (most turns never reach Haiku) while still being precise (Haiku sees real context, not just the matched fragment).
+The two-stage design keeps API cost down (most turns never reach Haiku) while keeping the catch precise (Haiku sees real context, not just the matched fragment).
 
 ## Logging
 
@@ -58,10 +58,10 @@ The three Stop hooks each append one JSONL line per Stop event to `~/.claude/hoo
 - `regex_no_match` — pre-filter didn't match; **includes `last_400_chars` of the response so you can see what slipped through**
 - `no_api_key` — `~/.claude/anthropic_api_key` is missing
 - `haiku_no_response` — Haiku call made but empty response (timeout, network failure, etc.)
-- `allowed` — Haiku classified as the benign look-alike
-- `blocked` — Haiku classified as the bad pattern; block was emitted
+- `allowed` — Haiku classified as the look-alike; no block emitted
+- `blocked` — Haiku classified as the targeted pattern; block was emitted
 
-The `regex_no_match` lines are the diagnostic surface for tuning. If you spot a slip in normal use, grep the log:
+The `regex_no_match` lines are the diagnostic surface for tuning. If a pattern slips through in normal use, grep the log:
 
 ```sh
 grep regex_no_match ~/.claude/hooks/logs/effort-estimate.jsonl | tail
@@ -69,7 +69,7 @@ grep regex_no_match ~/.claude/hooks/logs/effort-estimate.jsonl | tail
 
 Identify the shape that got past, add it to the regex pattern in the script.
 
-`block-memory-write.sh` does not log. It's structurally much simpler (path comparison only) and there's no two-stage decision to diagnose.
+`block-memory-write.sh` does not log. It is structurally much simpler (path comparison only) and has no two-stage decision to diagnose.
 
 ## Installing
 
@@ -78,15 +78,15 @@ Identify the shape that got past, add it to the regex pattern in the script.
 3. Drop your Anthropic API key into `~/.claude/anthropic_api_key` (for the Stop hooks; plain text, one line, no quotes).
 4. Wire the hooks up in `~/.claude/settings.json` — see `examples/settings.json` for the shape.
 
-For paths in `settings.json`: the example uses `$HOME/.claude/hooks/...` which assumes you've copied the scripts into that directory. An alternative — recommended — is to point `settings.json` directly at your clone (e.g. `$HOME/path/to/claude-code-hooks/hooks/...`). That keeps a single source of truth on disk: edit in the clone, run from the clone, commit and push from the clone.
+For paths in `settings.json`: the example uses `$HOME/.claude/hooks/...` which assumes you've copied the scripts into that directory. An alternative is to point `settings.json` directly at your clone (e.g. `$HOME/path/to/claude-code-hooks/hooks/...`). That keeps a single source of truth on disk: edit in the clone, run from the clone, commit and push from the clone.
 
 ## Tuning
 
-The regex pattern is one line near the top of each Stop-hook script. Extend it as you find slips in the log. The Haiku stage protects you from over-broadening: false positives at the regex stage cost an API call but don't produce false blocks.
+The regex pattern is one line near the top of each Stop-hook script. Extend it as you find slips in the log. The Haiku stage filters out matches that don't fit the pattern definition: a regex that matches widely costs an API call per match but does not block on the look-alike.
 
-The classification prompts are also in each script. If Haiku is mis-classifying in a specific direction, the prompt is where you'd adjust the examples or instructions.
+The classification prompts are also in each script. If Haiku classifies in a direction other than what you want, the prompt is where you'd adjust the examples or definitions.
 
-The `reason` message — what the assistant sees when blocked — is a `jq -n` literal near the bottom of each script. Rephrase it however you'd want a corrective note from yourself to read.
+The `reason` message — what the assistant sees when blocked — is a `jq -n` literal near the bottom of each script. Rewrite it however you want it to read.
 
 ## Files
 

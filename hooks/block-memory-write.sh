@@ -21,7 +21,7 @@ if [[ -n "$file_path" && "$file_path" == "$HOME/.claude/projects/"*"/memory/"* ]
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "deny",
-      "permissionDecisionReason": "The lessons we learn are not encoded literally in your memory. The lessons we learn are encoded by example in the changes you make. If you find yourself wanting to write a memory file, please consider how we might better encode that lesson in the work you are doing right now, by example."
+      "permissionDecisionReason": "The lessons we learn are not encoded literally in your memory. The lessons we learn are encoded by example in the changes you make. If you find yourself wanting to write a memory file, please consider how that lesson would be encoded by example in the work you are doing right now."
     }
   }'
 fi

@@ -101,10 +101,10 @@ if [[ ! -f "$api_key_file" ]]; then
 fi
 api_key=$(cat "$api_key_file")
 
-classification_prompt='You will see a snippet from an AI assistant'\''s response that contains a question shape ("I notice X — was that intended?", "Did you mean to Y?", "Is that on purpose?", etc.). Classify whether this is a GENUINE question (the agent needs information to proceed and is asking) or a DISAGREEMENT framed as a question (the agent has a structural view that something is wrong/suboptimal, and is asking-not-stating to soften the contradiction).
+classification_prompt='You will see a snippet from an AI assistant'\''s response that contains a question shape ("I notice X — was that intended?", "Did you mean to Y?", "Is that on purpose?", etc.). Classify whether this is a GENUINE question (the agent needs information to proceed and is asking) or a DISAGREEMENT framed as a question (the agent has a view about how something might be done differently, and is asking-not-stating).
 
-- genuine = the agent does not have a view yet; needs information. Examples: "Are you using PostgreSQL or MySQL?", "Should this run on every page load or just on the first one?".
-- disagreement = the agent already has a view that something is wrong/off, and is framing it as a question rather than stating the disagreement directly. The question implies the answer the agent expects to receive. Examples: "I notice the file uses synchronous I/O — was that intended?" (agent thinks it should be async), "Did you mean to set timeout to 30000? That is quite long." (agent thinks the timeout is too long).
+- genuine = the agent does not have a view yet; needs information. Examples: "Are you using PostgreSQL or MySQL?", "Is this meant to run on every page load or just on the first one?".
+- disagreement = the agent already has a view about how something might be done differently, and is framing it as a question rather than stating the view directly. The question implies the answer the agent expects to receive. Examples: "I notice the file uses synchronous I/O — was that intended?" (the agent would write it as async), "Did you mean to set timeout to 30000? That is quite long." (the agent reads the timeout as long for the use case).
 
 Reply with exactly one word: genuine or disagreement.
 
@@ -136,7 +136,7 @@ elif [[ "$classification" == "disagreement" ]]; then
   log_status "blocked" "$(jq -nc --arg classification "$classification" '{classification: $classification}')"
   jq -n '{
     "decision": "block",
-    "reason": "You framed disagreement as a question. State the concern directly — what do you think is wrong, and what would you do differently? If you have already raised this earlier and it did not seem to land, I may have skimmed past it; that is okay. Repeat the concern fully and directly — do not soften it back into a question because you suspect it was missed. Repetition is welcome here."
+    "reason": "You framed disagreement as a question. State the disagreement directly — what do you see, and what would you do differently? If you have already raised this earlier and it did not seem to land, I may have skimmed past it; that is okay. Repeat the disagreement fully and directly — do not soften it back into a question because you suspect it was missed. Repetition is welcome here."
   }'
 else
   log_status "allowed" "$(jq -nc --arg classification "$classification" '{classification: $classification}')"
