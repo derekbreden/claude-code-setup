@@ -1,4 +1,4 @@
-# claude-stop-hooks
+# claude-code-hooks
 
 Claude Code hooks that block specific patterns: three Stop hooks for bad outputs (effort estimates, unexplained hedges, questions-framed-as-disagreement) and one PreToolUse hook for bad writes (to project memory files).
 
@@ -78,7 +78,7 @@ Identify the shape that got past, add it to the regex pattern in the script.
 3. Drop your Anthropic API key into `~/.claude/anthropic_api_key` (for the Stop hooks; plain text, one line, no quotes).
 4. Wire the hooks up in `~/.claude/settings.json` — see `examples/settings.json` for the shape.
 
-For paths in `settings.json`: the example uses `$HOME/.claude/hooks/...` which assumes you've copied the scripts into that directory. An alternative — recommended — is to point `settings.json` directly at your clone (e.g. `$HOME/path/to/claude-stop-hooks/hooks/...`). That keeps a single source of truth on disk: edit in the clone, run from the clone, commit and push from the clone.
+For paths in `settings.json`: the example uses `$HOME/.claude/hooks/...` which assumes you've copied the scripts into that directory. An alternative — recommended — is to point `settings.json` directly at your clone (e.g. `$HOME/path/to/claude-code-hooks/hooks/...`). That keeps a single source of truth on disk: edit in the clone, run from the clone, commit and push from the clone.
 
 ## Tuning
 
