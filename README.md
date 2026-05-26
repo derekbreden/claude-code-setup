@@ -1,6 +1,6 @@
 # claude-code-hooks
 
-Claude Code hooks. Three Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question. One PreToolUse hook blocks writes targeting project memory files.
+Claude Code hooks. Three Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question. Two PreToolUse hooks block specific writes: project memory files, and content containing residue (justification, defense, decision narrative — the author going beyond describing what is).
 
 This is a personal tool, put on GitHub in case it helps someone running similar configurations. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
 
@@ -30,11 +30,13 @@ These run after each assistant turn. Each one runs a cheap regex pre-filter agai
 
 - **`block-question-as-disagreement.sh`** — catches "I notice X — was that intended?" / "Did you mean to Y?" / "Is that on purpose?" when the assistant frames a structural disagreement as a question. The block message asks the assistant to state the disagreement directly. Genuine information-gathering questions pass through; disagreement framed as a question gets blocked.
 
-### PreToolUse hooks (path-based)
+### PreToolUse hooks
 
-These run before specific tool calls. Simple: check the tool input for a property; if it matches, deny.
+These run before specific tool calls.
 
 - **`block-memory-write.sh`** — catches `Write` / `Edit` / `MultiEdit` / `NotebookEdit` calls whose target path is under any `~/.claude/projects/*/memory/` directory. The deny message asks the assistant to encode the lesson by example in the work it's doing rather than as a memory note. (`Bash` writes to memory paths via `echo >` are intentionally not blocked — the hook would otherwise gate every shell command for a threat that hasn't materialized.)
+
+- **`block-residue.sh`** — catches `Write` / `Edit` / `MultiEdit` / `NotebookEdit` calls whose new content contains residue (justification, defense, decision narrative — the author going beyond describing what is). Two-stage like the Stop hooks: regex pre-filter on the new content, Haiku adjudication on a ±600-char window around the first match. The deny message points the assistant at three calibration files (`Principle.md`, `You.md`, `Framing.md`) in `~/Developer/homesodamachine/calibration/` and asks them to read those before looking at what they wrote. Skips binary/structured files (`.dxf`, `.json`, `.yaml`, etc.) and the calibration files themselves. Fires only when the calibration files exist at the expected path; bails silently otherwise.
 
 ## How the Stop hooks work
 
@@ -51,11 +53,12 @@ The two-stage design keeps API cost down (most turns never reach Haiku) while ke
 
 ## Logging
 
-The three Stop hooks each append one JSONL line per Stop event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
+The three Stop hooks and `block-residue.sh` each append one JSONL line per event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
 
-- `loop_guard` — re-entry from a revision attempt, skipped
-- `no_transcript` / `no_assistant_message` / `empty_or_short_text` / `empty_after_strip` — nothing to check
-- `regex_no_match` — pre-filter didn't match; **includes `last_400_chars` of the response so you can see what slipped through**
+- `loop_guard` — re-entry from a revision attempt, skipped (Stop hooks only)
+- `no_transcript` / `no_assistant_message` / `empty_or_short_text` / `empty_after_strip` — nothing to check (Stop hooks)
+- `wrong_tool` / `skipped_calibration` / `skipped_non_prose` / `empty_or_short` / `no_calibration_files` — file or tool filtered out (`block-residue.sh` only)
+- `regex_no_match` — pre-filter didn't match; **Stop-hook log lines include `last_400_chars` of the response so you can see what slipped through**
 - `no_api_key` — `~/.claude/anthropic_api_key` is missing
 - `haiku_no_response` — Haiku call made but empty response (timeout, network failure, etc.)
 - `allowed` — Haiku classified as the look-alike; no block emitted
@@ -90,8 +93,9 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 
 ## Files
 
-- `hooks/block-effort-estimate.sh` — effort-estimate hook (Stop)
-- `hooks/block-unexplained-hedge.sh` — hedge hook (Stop)
-- `hooks/block-question-as-disagreement.sh` — question-as-disagreement hook (Stop)
-- `hooks/block-memory-write.sh` — memory-write hook (PreToolUse)
-- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all four hooks
+- `hooks/block-effort-estimate.sh` — effort-estimate hook (Stop, regex + Haiku two-stage)
+- `hooks/block-unexplained-hedge.sh` — hedge hook (Stop, regex + Haiku two-stage)
+- `hooks/block-question-as-disagreement.sh` — question-as-disagreement hook (Stop, regex + Haiku two-stage)
+- `hooks/block-memory-write.sh` — memory-write hook (PreToolUse, path comparison only)
+- `hooks/block-residue.sh` — residue hook (PreToolUse, regex + Haiku two-stage)
+- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all five hooks
