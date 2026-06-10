@@ -13,7 +13,10 @@
 # `git status --porcelain` — so this denies exactly the cases that would stamp
 # -dirty, and nothing else. Build-only runs and clean-tree flashes pass.
 #
-# Hard deny, every time (not once-per-session). The deny message carries the
+# Nudge once per session, then pass through: unlike branch creation, a dirty
+# flash is sometimes the point (testing uncommitted changes on hardware), so a
+# deliberate retry in the same session is allowed. Mirrors the per-session
+# marker used by block-web.sh / block-residue.sh. The deny message carries the
 # convention, in the register it was given.
 
 set -uo pipefail
@@ -46,6 +49,28 @@ fi
 # fw_version.h headers don't count). Bail silently if this isn't a git repo.
 dirty=$(git status --porcelain 2>/dev/null) || exit 0
 [[ -n "$dirty" ]] || exit 0
+
+# Nudge once per session, then pass through. Unlike branch creation, a dirty
+# flash is sometimes the point (testing uncommitted changes on hardware), so a
+# deliberate retry is allowed. Per-session marker + 7-day GC, mirroring
+# block-web.sh / block-residue.sh.
+WARNED_DIR="$HOME/.claude/hooks/state"
+mkdir -p "$WARNED_DIR" 2>/dev/null || true
+find "$WARNED_DIR" -type f -name 'flash-warned-*' -mtime +7 -delete 2>/dev/null || true
+transcript_path=$(printf '%s' "$input" | jq -r '.transcript_path // empty')
+session_id_field=$(printf '%s' "$input" | jq -r '.session_id // empty')
+if [[ -n "$transcript_path" ]]; then
+  session_marker=$(basename "$transcript_path" .jsonl)
+elif [[ -n "$session_id_field" ]]; then
+  session_marker="$session_id_field"
+else
+  session_marker=""
+fi
+if [[ -n "$session_marker" && -f "$WARNED_DIR/flash-warned-$session_marker" ]]; then
+  exit 0
+fi
+[[ -n "$session_marker" ]] && touch "$WARNED_DIR/flash-warned-$session_marker" 2>/dev/null || true
+
 rev=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 dirtylist=$(printf '%s\n' "$dirty" | head -n 20)
 
@@ -56,7 +81,7 @@ pre_build.py stamps FW_VERSION from the git rev, so flashing now bakes \"${rev}-
 Uncommitted right now:
 ${dirtylist}
 
-Commit what's pending (even WIP — that's the point, it still gets a real rev), then re-run the flash."
+Commit what's pending (even WIP — it still gets a real rev), then re-run. If you do need a dirty test-flash, re-run as-is and it'll go through — this fires once per session."
 
 jq -n --arg reason "$reason" '{
   "hookSpecificOutput": {
