@@ -15,7 +15,10 @@
 # engine the deny message points at); bails silently anywhere else.
 #
 # Diagnostic log: every invocation appends one JSONL line to
-# $HOME/.claude/hooks/logs/measurement.jsonl with a "status" field.
+# $HOME/.claude/hooks/logs/measurement.jsonl with a "status" field. After a Haiku
+# call the line also carries the "window" it actually saw and Haiku's "raw" reply,
+# so a misclassification is diagnosable from the log alone — without the window,
+# the verdict can't be traced back to the text that produced it.
 
 set -euo pipefail
 
@@ -126,11 +129,12 @@ fi
 # Pre-filter + window in one pass. A measurement-shaped literal is
 #   <dia><number>   diameter sign (⌀ ø Ø) then digits
 #   <number> mm     digits, optional decimals, optional space, mm
-#   <number>°       digits then degree sign
+#   <number>°       digits then degree sign — angles only; a temperature
+#                    (°C/°F/°K) is never project geometry, so it is excluded.
 # Lenient by design — a false positive costs one Haiku call, a false negative is
 # silent drift. Prints a ±600-char window around the first match; empty = none.
 window=$(printf '%s' "$candidate" | perl -CSD -0777 -ne '
-  if (/(?:[\x{2300}\x{00F8}\x{00D8}]\s*[0-9]|[0-9][0-9.]*\s*mm|[0-9][0-9.]*\s*\x{00B0})/) {
+  if (/(?:[\x{2300}\x{00F8}\x{00D8}]\s*[0-9]|[0-9][0-9.]*\s*mm|[0-9][0-9.]*\s*\x{00B0}(?!\s?[CFK]))/) {
     my $s = $-[0] - 600; $s = 0 if $s < 0;
     my $len = ($+[0] - $-[0]) + 1200;
     print substr($_, $s, $len);
@@ -197,17 +201,25 @@ response=$(curl -sS https://api.anthropic.com/v1/messages \
   --max-time 8 \
   -d "$body" 2>/dev/null || echo '{}')
 
-classification=$(printf '%s' "$response" | jq -r '.content[0].text // empty' | tr -d '[:space:].' | tr '[:upper:]' '[:lower:]')
+# Capture Haiku's raw reply, then normalize for matching. Match on a PREFIX, not
+# exact equality: max_tokens is small and Haiku sometimes ignores "one word" and
+# trails a clause ("derivable. The wall ...") that truncates mid-sentence. An
+# exact == would mis-bucket those verbose replies as allowed — a silent miss in
+# the only direction that matters. Anything that is not a "derivable" prefix
+# fails open (external, mangled, or empty all allow the write).
+raw_reply=$(printf '%s' "$response" | jq -r '.content[0].text // empty')
+classification=$(printf '%s' "$raw_reply" | tr -d '[:space:].' | tr '[:upper:]' '[:lower:]')
+window_log="${window:0:600}"
 
 if [[ -z "$classification" ]]; then
-  log_status "haiku_no_response"
-elif [[ "$classification" == "derivable" ]]; then
+  log_status "haiku_no_response" "$(jq -nc --arg window "$window_log" '{window: $window}')"
+elif [[ "$classification" == derivable* ]]; then
   # Mark this session as nudged. Subsequent underived measurements in the same
   # session pass through — the agent has the docgen context now.
   if [[ -n "$session_marker" ]]; then
     touch "$WARNED_DIR/measurement-warned-$session_marker" 2>/dev/null || true
   fi
-  log_status "blocked" "$(jq -nc --arg classification "$classification" --arg file "$file_path" --arg session "$session_marker" '{classification: $classification, file: $file, session: $session}')"
+  log_status "blocked" "$(jq -nc --arg classification "$classification" --arg raw "$raw_reply" --arg file "$file_path" --arg session "$session_marker" --arg window "$window_log" '{classification: $classification, raw: $raw, file: $file, session: $session, window: $window}')"
   jq -n --arg repo "$repo_root" '{
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
@@ -216,5 +228,5 @@ elif [[ "$classification" == "derivable" ]]; then
     }
   }'
 else
-  log_status "allowed" "$(jq -nc --arg classification "$classification" '{classification: $classification}')"
+  log_status "allowed" "$(jq -nc --arg classification "$classification" --arg raw "$raw_reply" --arg file "$file_path" --arg window "$window_log" '{classification: $classification, raw: $raw, file: $file, window: $window}')"
 fi
