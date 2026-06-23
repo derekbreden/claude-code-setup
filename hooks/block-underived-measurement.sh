@@ -26,8 +26,10 @@ LOG_FILE="$HOME/.claude/hooks/logs/measurement.jsonl"
 WARNED_DIR="$HOME/.claude/hooks/state"
 mkdir -p "$(dirname "$LOG_FILE")" "$WARNED_DIR" 2>/dev/null || true
 
-# Garbage-collect stale per-session warned markers (older than 7 days).
-find "$WARNED_DIR" -type f -name 'measurement-warned-*' -mtime +7 -delete 2>/dev/null || true
+# Garbage-collect stale per-session warned markers (older than 7 days). No -type
+# filter: the marker is now a directory (see the atomic claim below), and this
+# also sweeps any legacy file markers from before the switch.
+find "$WARNED_DIR" -name 'measurement-warned-*' -mtime +7 -delete 2>/dev/null || true
 
 log_status() {
   local status="$1"
@@ -59,7 +61,7 @@ else
   session_marker=""
 fi
 
-if [[ -n "$session_marker" && -f "$WARNED_DIR/measurement-warned-$session_marker" ]]; then
+if [[ -n "$session_marker" && -d "$WARNED_DIR/measurement-warned-$session_marker" ]]; then
   log_status "already_warned_this_session" "$(jq -nc --arg sid "$session_marker" '{session: $sid}')"
   exit 0
 fi
@@ -214,10 +216,20 @@ window_log="${window:0:600}"
 if [[ -z "$classification" ]]; then
   log_status "haiku_no_response" "$(jq -nc --arg window "$window_log" '{window: $window}')"
 elif [[ "$classification" == derivable* ]]; then
-  # Mark this session as nudged. Subsequent underived measurements in the same
-  # session pass through — the agent has the docgen context now.
+  # Claim this session's single nudge atomically. mkdir is one syscall: it either
+  # creates the marker (we are the first underived write this session -> block) or
+  # fails because it already exists -- a same-turn racer that slipped past the
+  # early-exit before we set the marker, or (rarely) an infra error. Either way we
+  # pass through. Folding the check and the set into this one atomic op is what
+  # closes the parallel-write race: no test-then-touch window, nothing to lock or
+  # hang. An empty session_marker (no id to key on) skips the claim and blocks.
+  claimed=true
   if [[ -n "$session_marker" ]]; then
-    touch "$WARNED_DIR/measurement-warned-$session_marker" 2>/dev/null || true
+    mkdir "$WARNED_DIR/measurement-warned-$session_marker" 2>/dev/null || claimed=false
+  fi
+  if [[ "$claimed" == false ]]; then
+    log_status "lost_claim_race" "$(jq -nc --arg session "$session_marker" --arg file "$file_path" '{session: $session, file: $file}')"
+    exit 0
   fi
   log_status "blocked" "$(jq -nc --arg classification "$classification" --arg raw "$raw_reply" --arg file "$file_path" --arg session "$session_marker" --arg window "$window_log" '{classification: $classification, raw: $raw, file: $file, session: $session, window: $window}')"
   jq -n --arg repo "$repo_root" '{
