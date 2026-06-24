@@ -138,8 +138,16 @@ classification_defs='A cheap regex flagged a possible time/effort estimate in th
 - projection = the text describes outcomes, properties, regulatory cadences, or durations of states (NOT work effort). Examples: "guaranteed multi-year loss", "bottle goes flat overnight", "tank lasts months", "for as long as the service operates", "every 5 years on 3AL aluminum", "happily for a year".
 - none = there is no actual time estimate in the snippet; the regex misfired on text that is not a duration at all.'
 
+# The highlight names the trigger span AND warns about the failure mode that
+# naming a span introduces: focusing on a time-shaped fragment pulls attention
+# off the surrounding word ("soak", "render", "Xometry", "ago") that marks it a
+# process/machine/vendor/past duration rather than work-effort. Measured on 59
+# real flagged windows: the bare "read it in context" phrasing was net-negative
+# (it over-blocked projections); this projection-aware phrasing was the clear
+# winner — it keeps the real effort catches and fixes projection misfires the
+# un-highlighted prompt blocked.
 if [[ -n "$highlight" ]]; then
-  hl_line=$(printf 'The exact text the regex flagged is: "%s". Read it in its surrounding context in the snippet before deciding.' "$highlight")
+  hl_line=$(printf 'The exact text the regex flagged is: "%s". Decide from the surrounding context, not this fragment alone — these same words often describe a process/cure/soak, a machine/compute/render, a vendor lead time, or a past/elapsed duration, none of which are work-effort. Call it effort only if the context shows someone estimating how long their own hands-on work will take.' "$highlight")
 else
   hl_line=""
 fi
