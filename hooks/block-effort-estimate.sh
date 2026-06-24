@@ -71,7 +71,7 @@ fi
 # The pattern is intentionally lenient — false positives are cheap (one Haiku
 # call) but false negatives are silent slips. Extend it when the log shows
 # something getting past.
-pattern='([Hh]alf[ \-]+(an?[ ]+)?(hour|day|week|month)|[Aa]n?[ ]+(afternoon|evening|morning|hour|day|week|month|year)s?|[Aa][ ]+few[ ]+(minutes?|hours?|days?|weeks?|months?)|[Aa][ ]+couple[ ]+(of[ ]+)?(minutes?|hours?|days?|weeks?|months?|years?)|(one|two|three|four|five|six|seven|eight|nine|ten)[ ]+(minutes?|hours?|days?|weeks?|months?|years?)|~?[0-9]+[ ]*-?[ ]*(min(ute)?s?|hours?|hrs?|days?|weeks?|wks?|months?|years?|yrs?)|(minutes?|hours?|days?|weeks?|months?|years?)[ \-]*ish|weeks?[ ]+(,[ ]+)?not[ ]+months?|months?[ ]+(,[ ]+)?not[ ]+weeks?|time-to-[a-z]+|(should|would|will|might)[ ]+take|takes?[ ]+(about|roughly|a)|multi-year|several[ ]+(years?|months?|weeks?))'
+pattern='([Hh]alf[ \-]+(an?[ ]+)?(hour|day|week|month)|[Aa]n?[ ]+(afternoon|evening|morning|hour|day|week|month|year)s?|[Aa][ ]+few[ ]+(minutes?|hours?|days?|weeks?|months?)|[Aa][ ]+couple[ ]+(of[ ]+)?(minutes?|hours?|days?|weeks?|months?|years?)|(one|two|three|four|five|six|seven|eight|nine|ten)[ ]+(minutes?|hours?|days?|weeks?|months?|years?)|~?[0-9]+[ ]*-?[ ]*(min(ute)?s?|hours?|hrs?|days?|weeks?|wks?|months?|years?|yrs?)([^[:alpha:]]|$)|(minutes?|hours?|days?|weeks?|months?|years?)[ \-]*ish|weeks?[ ]+(,[ ]+)?not[ ]+months?|months?[ ]+(,[ ]+)?not[ ]+weeks?|time-to-[a-z]+|(should|would|will|might)[ ]+take|takes?[ ]+(about|roughly|a)|multi-year|several[ ]+(years?|months?|weeks?))'
 
 if ! printf '%s\n' "$last_text" | grep -qE "$pattern"; then
   # Log the last 400 chars of the response so a future "why didn't this fire?"
@@ -103,12 +103,13 @@ if [[ ! -f "$api_key_file" ]]; then
 fi
 api_key=$(cat "$api_key_file")
 
-classification_prompt='You will see a snippet from an AI assistant'\''s response that contains time language. Classify whether the time language is an EFFORT estimate or a PROJECTION/property description.
+classification_prompt='A cheap regex flagged a possible time/effort estimate in the snippet below. The regex is deliberately lenient and frequently misfires on things that are not durations at all — part numbers ("DIP-28"), filenames ("mini.tsx"), version numbers, quantities, dimensions ("2.54mm"). Decide which of THREE cases applies.
 
-- effort = estimates how long someone (especially the assistant itself) will spend doing work. Examples: "this will take a few hours", "half a day of work", "weeks not months", "~4 hours", "maybe a half-day of careful work", "multi-year project".
-- projection = describes outcomes, properties, regulatory cadences, or durations of states (NOT work effort). Examples: "guaranteed multi-year loss", "bottle goes flat overnight", "tank lasts months", "for as long as the service operates", "every 5 years on 3AL aluminum", "happily for a year".
+- effort = the text estimates how long someone (especially the assistant itself) will spend doing work. Examples: "this will take a few hours", "half a day of work", "weeks not months", "~4 hours", "maybe a half-day of careful work", "multi-year project".
+- projection = the text describes outcomes, properties, regulatory cadences, or durations of states (NOT work effort). Examples: "guaranteed multi-year loss", "bottle goes flat overnight", "tank lasts months", "for as long as the service operates", "every 5 years on 3AL aluminum", "happily for a year".
+- none = there is no actual time estimate in the snippet; the regex misfired on text that is not a duration at all.
 
-Reply with exactly one word: effort or projection.
+Reply with exactly one word: effort, projection, or none.
 
 Snippet:
 '
