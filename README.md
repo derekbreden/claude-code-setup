@@ -6,7 +6,7 @@ folder; one `install.sh` wires them into `~/.claude`.
 | Folder | What it is | How it reaches Claude Code |
 | --- | --- | --- |
 | `hooks/` | Bash guardrail hooks (Stop + PreToolUse) — effort estimates, unexplained hedges, residue, etc. | referenced by absolute path from `~/.claude/settings.json` |
-| `jsonl2md/` | Session export + `delta`/`watch` relay tool, the `/relay` slash command (`commands/`), and the Salon Protocol (`SALON.md`) | `jsonl2md.py` is a CLI; `commands/relay.md` is symlinked into `~/.claude/commands/` |
+| `jsonl2md/` | Session export + `delta`/`watch` tools, and the `/relay` pull command (`commands/`, doc in `SALON.md`) | `jsonl2md.py` is a CLI; `commands/relay.md` is symlinked into `~/.claude/commands/` |
 
 The two mechanisms differ by design: hooks are only discovered via `settings.json`
 path entries (there is no `~/.claude/hooks/` auto-load), and slash commands are only
@@ -25,5 +25,5 @@ are executable, and prints the base path to reference them from `~/.claude/setti
 Re-runnable. The `settings.json` hook entries are hand-curated and not rewritten by the
 script.
 
-See [`jsonl2md/SALON.md`](jsonl2md/SALON.md) for the human-mediated session-to-session
-relay workflow that ties the `delta` tool and the `/relay` command together.
+See [`jsonl2md/SALON.md`](jsonl2md/SALON.md) for the `/relay` pull shortcut — bringing one
+session's clean transcript into another — and the `delta`/`watch` tools behind it.

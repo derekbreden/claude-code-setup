@@ -53,7 +53,7 @@ Run `./jsonl2md.py` with no arguments to see the full help and example commands.
 
 The positional accepts an exact session title **or** a raw `cliSessionId`, so untitled/archived sessions stay reachable. The cursor lives per session at `~/.jsonl2md/cursors/<cliSessionId>.json` and anchors on the last transcript *record* seen — not the last rendered turn — so the ~70% of records that are tool/thinking plumbing between two turns never desync the delta. The cursor advances **only** on `--commit`, so it always reflects what you actually relayed, never what you merely previewed.
 
-See [SALON.md](SALON.md) for the human-mediated session-to-session relay workflow these commands are built for.
+See [SALON.md](SALON.md) for the `/relay` pull workflow these commands back — bringing one session's clean transcript into another.
 
 ## Install
 
@@ -63,7 +63,7 @@ pip install -r requirements.txt
 
 That installs `cryptography` (used to decrypt Claude.app's cookie store on macOS).
 
-Optional — install the `/relay` slash command (the Salon Protocol's invocation surface; see [SALON.md](SALON.md)):
+Optional — install the `/relay` pull command (see [SALON.md](SALON.md)):
 
 ```sh
 ln -s "$PWD/commands/relay.md" ~/.claude/commands/relay.md
