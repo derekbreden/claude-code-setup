@@ -122,8 +122,9 @@ Works the same in the macOS app: type `/` in the prompt box (or **+** → **Slas
 commands**) and pick `relay`. To scope it to one project instead of everywhere, link (or
 copy) the file into that project's `.claude/commands/relay.md`.
 
-**Install** — link the tracked file into place so Claude Code discovers it:
+**Install** — from the monorepo root, `./install.sh` symlinks this command (and any
+other `jsonl2md/commands/*.md`) into `~/.claude/commands/`. By hand, equivalently:
 
 ```sh
-ln -s "$PWD/commands/relay.md" ~/.claude/commands/relay.md   # run from the repo root
+ln -sfn "$(pwd)/commands/relay.md" ~/.claude/commands/relay.md   # run from this jsonl2md/ dir
 ```
