@@ -96,14 +96,26 @@ binding, clear A's instruction.
 - **Echo risk.** A relayed turn becomes a real user turn in B's transcript, so a later
   `delta "B"` will re-emit it. Curate; don't ping-pong the same text.
 
-## Optional: wire it into a project
+## Invoking it: the `/relay` command
 
-Paste a pointer into a project's `CLAUDE.md` so any session there knows the protocol:
+Don't put this in `CLAUDE.md`. A `CLAUDE.md` stanza is **ambient** — it loads into every
+agent in the project on every turn, including the ones that will never relay. Use a
+custom slash command instead: its body enters context **only when you type `/relay`, only
+in that chat**, and is invisible to every other session until then.
 
-```markdown
-## Relaying between sessions (Salon Protocol)
-To hand a finding to another live session, call mcp__ccd_session_mgmt__send_message
-with that session's id (find it via list_sessions). It always prompts the user to
-confirm. Relay only the most recent finding unless told "relay since last." See
-~/jsonl2md/SALON.md.
+`~/.claude/commands/relay.md` (user scope — available in every chat, ambient cost zero):
+
 ```
+/relay PCB Viewer
+/relay PCB Viewer — just the divider-net via count, nothing else
+/relay Adversary — does the pour clearance survive a 0.2 mm shift?
+```
+
+It resolves the peer via `list_sessions`, picks the payload (your most recent finding,
+or the text you named after a `—`), and calls `send_message` — which always shows you the
+confirm dialog. The command is marked `disable-model-invocation`, so only you can fire it;
+the agent never relays on its own.
+
+Works the same in the macOS app: type `/` in the prompt box (or **+** → **Slash
+commands**) and pick `relay`. To scope it to one project instead of everywhere, move the
+file to that project's `.claude/commands/relay.md`.
