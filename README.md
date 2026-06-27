@@ -63,6 +63,12 @@ pip install -r requirements.txt
 
 That installs `cryptography` (used to decrypt Claude.app's cookie store on macOS).
 
+Optional — install the `/relay` slash command (the Salon Protocol's invocation surface; see [SALON.md](SALON.md)):
+
+```sh
+ln -s "$PWD/commands/relay.md" ~/.claude/commands/relay.md
+```
+
 ## Usage
 
 ```sh

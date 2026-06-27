@@ -103,7 +103,9 @@ agent in the project on every turn, including the ones that will never relay. Us
 custom slash command instead: its body enters context **only when you type `/relay`, only
 in that chat**, and is invisible to every other session until then.
 
-`~/.claude/commands/relay.md` (user scope — available in every chat, ambient cost zero):
+The command is tracked in this repo at [`commands/relay.md`](commands/relay.md) and
+symlinked into `~/.claude/commands/relay.md` (user scope — available in every chat,
+ambient cost zero):
 
 ```
 /relay PCB Viewer
@@ -117,5 +119,11 @@ confirm dialog. The command is marked `disable-model-invocation`, so only you ca
 the agent never relays on its own.
 
 Works the same in the macOS app: type `/` in the prompt box (or **+** → **Slash
-commands**) and pick `relay`. To scope it to one project instead of everywhere, move the
-file to that project's `.claude/commands/relay.md`.
+commands**) and pick `relay`. To scope it to one project instead of everywhere, link (or
+copy) the file into that project's `.claude/commands/relay.md`.
+
+**Install** — link the tracked file into place so Claude Code discovers it:
+
+```sh
+ln -s "$PWD/commands/relay.md" ~/.claude/commands/relay.md   # run from the repo root
+```
