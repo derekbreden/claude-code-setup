@@ -16,6 +16,9 @@ Two sources, each with a list verb and an export verb, plus a standalone rendere
   Standalone:
     render <path.jsonl>    Render any Claude Code .jsonl (or stdin) to .md on stdout.
 
+  Cross-session (the write half of relay):
+    send <title> <text>    Queue a message injected into another live session on its next tool call.
+
 Sessions are discovered from Claude.app's metadata at
     ~/Library/Application Support/Claude/claude-code-sessions/<workspace>/<device>/local_*.json
 with transcripts at
@@ -38,6 +41,7 @@ from urllib.request import Request, urlopen
 DEFAULT_CWD = "/Users/derekbredensteiner/Developer/homesodamachine"
 META_ROOT = os.path.expanduser("~/Library/Application Support/Claude/claude-code-sessions")
 JSONL_ROOT = os.path.expanduser("~/.claude/projects")
+RELAY_INBOX_ROOT = os.path.expanduser("~/.claude/hooks/relay-inbox")
 CLAUDE_APP_DIR = os.path.expanduser("~/Library/Application Support/Claude")
 COOKIE_DB = os.path.join(CLAUDE_APP_DIR, "Cookies")
 KEYCHAIN_SERVICE = "Claude Safe Storage"
@@ -450,6 +454,25 @@ def cmd_watch(args):
         sys.stderr.write(f"\n[watch] {label}: stopped (cursor not committed).\n")
 
 
+def cmd_send(args):
+    cli_id, label = resolve_target(args.title, args.cwd)
+    box = os.path.join(RELAY_INBOX_ROOT, cli_id)
+    os.makedirs(box, exist_ok=True)
+    msg = {"mode": args.mode, "text": args.text, "from": args.sender, "ts": time.time()}
+    # Unique per-message file (maildir-style: no clobber, no lock). Write to a
+    # .tmp the receiver's *.json glob ignores, then atomically rename it in.
+    dst = os.path.join(box, f"{int(time.time() * 1000):013d}-{os.getpid()}.json")
+    tmp = dst + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(msg, f)
+    os.replace(tmp, dst)
+    sys.stderr.write(
+        f"[relay] queued {args.mode} message for {label} ({cli_id}); "
+        f"it lands on that session's next tool call.\n"
+    )
+    print(dst)
+
+
 EPILOG = """\
 examples:
   # Claude Code sessions (current project on disk)
@@ -471,6 +494,10 @@ examples:
   jsonl2md.py delta "PCB clean" --tail 2   # just the last 2 exchanges
   jsonl2md.py watch "PCB clean"            # stream new turns live as they land
 
+  # Interject into another live session (delivered on its next tool call)
+  jsonl2md.py send "Autorouter" "stop and reconsider whether fix 1 is still needed"
+  jsonl2md.py send "Autorouter" "looks good, keep going" --mode nudge
+
   # Standalone: any Claude Code .jsonl on disk
   jsonl2md.py render path/to/session.jsonl > out.md
   cat session.jsonl | jsonl2md.py render > out.md
@@ -485,7 +512,7 @@ def main():
     )
     sub = ap.add_subparsers(
         dest="cmd",
-        metavar="{list-sessions,export-session,list-chats,export-chat,render,delta,watch}",
+        metavar="{list-sessions,export-session,list-chats,export-chat,render,delta,watch,send}",
     )
 
     p_ls = sub.add_parser("list-sessions", help="list non-archived, user-titled Claude Code sessions")
@@ -558,6 +585,22 @@ def main():
     p_watch.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
     p_watch.add_argument("--interval", type=float, default=1.0, help="poll seconds (default: 1.0)")
     p_watch.set_defaults(func=cmd_watch)
+
+    p_send = sub.add_parser(
+        "send",
+        help="queue a message to inject into another live session on its next tool call",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_send.add_argument("title", help="exact session title (see list-sessions) or a cliSessionId")
+    p_send.add_argument("text", help="the message to deliver into that session")
+    p_send.add_argument("--mode", choices=["interrupt", "nudge"], default="interrupt",
+                        help="interrupt: block the target's next tool call with the message "
+                             "(default); nudge: attach it without blocking")
+    p_send.add_argument("--from", dest="sender", default=None,
+                        help="optional label for who is sending (shown to the receiving agent)")
+    p_send.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
+    p_send.set_defaults(func=cmd_send)
 
     args = ap.parse_args()
     if not args.cmd:

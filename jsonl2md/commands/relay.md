@@ -24,3 +24,5 @@ Steps:
 3. **Read it in.** Read the `.md` it wrote (or use the delta stdout). Then give the user a 2–4 line orientation: what that session was doing and where it left off, and ask what they want to bring over or do with it here.
 
 Pull one session per invocation. Read-only: this never writes to, messages, or disturbs the source session.
+
+To send a message the other way — interject into another live session — use `/relay-send`.
