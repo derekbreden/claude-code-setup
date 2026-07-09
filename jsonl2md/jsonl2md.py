@@ -4,8 +4,10 @@
 Two sources, each with a list verb and an export verb, plus a standalone renderer:
 
   Claude Code sessions (a project on disk):
-    list-sessions          List non-archived, user-titled sessions in --cwd.
-    export-session <title> Export one session to .md (filename = title).
+    list-sessions          List titled desktop sessions + VSCode-extension
+                           sessions in --cwd.
+    export-session <title> Export one session to .md (filename = title). Also
+                           accepts a raw cliSessionId (or unique prefix).
     export-session --all   Export every session matching the filter.
 
   Claude.ai chats (desktop app sidebar):
@@ -19,9 +21,12 @@ Two sources, each with a list verb and an export verb, plus a standalone rendere
   Cross-session (the write half of relay):
     send <title> <text>    Queue a message injected into another live session on its next tool call.
 
-Sessions are discovered from Claude.app's metadata at
+Desktop-app sessions are discovered from Claude.app's metadata at
     ~/Library/Application Support/Claude/claude-code-sessions/<workspace>/<device>/local_*.json
-with transcripts at
+VSCode-extension sessions carry no such titled record; they're discovered from
+the CLI's per-process descriptors at
+    ~/.claude/sessions/<pid>.json          (entrypoint == "claude-vscode")
+Both resolve to transcripts at
     ~/.claude/projects/<cwd-with-slashes-as-dashes>/<cliSessionId>.jsonl
 Chats are fetched from claude.ai using cookies decrypted from the desktop app's cookie store.
 """
@@ -40,6 +45,7 @@ from urllib.request import Request, urlopen
 
 DEFAULT_CWD = "/Users/derekbredensteiner/Developer/homesodamachine"
 META_ROOT = os.path.expanduser("~/Library/Application Support/Claude/claude-code-sessions")
+SESSIONS_ROOT = os.path.expanduser("~/.claude/sessions")
 JSONL_ROOT = os.path.expanduser("~/.claude/projects")
 RELAY_INBOX_ROOT = os.path.expanduser("~/.claude/hooks/relay-inbox")
 CLAUDE_APP_DIR = os.path.expanduser("~/Library/Application Support/Claude")
@@ -202,6 +208,43 @@ def resolve_target(positional, cwd):
     sys.exit(1)
 
 
+def list_vscode_sessions(target_cwd):
+    """VSCode-extension sessions for target_cwd, from the CLI's per-process
+    descriptors at ~/.claude/sessions/<pid>.json (entrypoint 'claude-vscode').
+
+    These carry no user title — the desktop app's renaming never touches them —
+    so we synthesize a self-labeling one ('VSCode Extension - <id8>') and shape
+    the dict like a desktop session, so export/delta/watch/send treat it
+    identically. lastActivityAt is the transcript's mtime (the descriptor's
+    startedAt is only the process start). Descriptors whose transcript hasn't
+    been written yet are skipped."""
+    out = []
+    for p in glob.glob(f"{SESSIONS_ROOT}/*.json"):
+        try:
+            m = json.load(open(p))
+        except Exception:
+            continue
+        if m.get("entrypoint") != "claude-vscode" or m.get("cwd") != target_cwd:
+            continue
+        sid = m.get("sessionId")
+        if not sid:
+            continue
+        jsonl = jsonl_path_for(sid, target_cwd)
+        try:
+            last = int(os.path.getmtime(jsonl) * 1000)
+        except OSError:
+            continue  # descriptor for a session with no transcript yet
+        out.append({
+            "cliSessionId": sid,
+            "cwd": target_cwd,
+            "title": f"VSCode Extension - {sid[:8]}",
+            "titleSource": "vscode",
+            "isArchived": False,
+            "lastActivityAt": last,
+        })
+    return out
+
+
 def list_sessions(target_cwd):
     out = []
     for p in glob.glob(f"{META_ROOT}/*/*/local_*.json"):
@@ -216,6 +259,10 @@ def list_sessions(target_cwd):
         if m.get("titleSource") != "user":
             continue
         out.append(m)
+    # VSCode-extension sessions have no desktop title record; fold them in so
+    # they list and export too, deduped against any desktop entry for the same id.
+    seen = {m.get("cliSessionId") for m in out}
+    out.extend(s for s in list_vscode_sessions(target_cwd) if s["cliSessionId"] not in seen)
     out.sort(key=lambda m: m.get("lastActivityAt", 0), reverse=True)
     return out
 
@@ -310,7 +357,16 @@ def cmd_export_session(args):
     elif args.title:
         targets = [s for s in sessions if s["title"] == args.title]
         if not targets:
-            print(f"No non-archived user-titled session named {args.title!r} in {args.cwd}", file=sys.stderr)
+            # fall back to a raw cliSessionId (full or unique prefix) — how you
+            # name a VSCode-extension session without typing its synthesized title
+            targets = [s for s in sessions if s.get("cliSessionId", "").startswith(args.title)]
+            if len(targets) > 1:
+                print(f"{args.title!r} matches {len(targets)} sessions by id prefix; be more specific:", file=sys.stderr)
+                for s in targets:
+                    print(f"  {s.get('cliSessionId')}  {s['title']}", file=sys.stderr)
+                sys.exit(1)
+        if not targets:
+            print(f"No session titled {args.title!r} (or with that cliSessionId) in {args.cwd}", file=sys.stderr)
             sys.exit(1)
     else:
         print("export-session: provide a title or --all", file=sys.stderr)
@@ -481,6 +537,8 @@ examples:
   jsonl2md.py export-session "Professor - done"
   jsonl2md.py export-session "Professor - done" --out ~/Desktop
   jsonl2md.py export-session --all --out ./exports
+  jsonl2md.py export-session "VSCode Extension - 303f72e5"  # a VSCode-ext session
+  jsonl2md.py export-session 303f72e5                       # ...or by id prefix
 
   # Claude.ai chats (desktop app sidebar)
   jsonl2md.py list-chats
@@ -515,7 +573,7 @@ def main():
         metavar="{list-sessions,export-session,list-chats,export-chat,render,delta,watch,send}",
     )
 
-    p_ls = sub.add_parser("list-sessions", help="list non-archived, user-titled Claude Code sessions")
+    p_ls = sub.add_parser("list-sessions", help="list titled desktop + VSCode-extension Claude Code sessions")
     p_ls.add_argument("--cwd", default=DEFAULT_CWD,
                      help=f"project path to filter by (default: {DEFAULT_CWD})")
     p_ls.set_defaults(func=cmd_list_sessions)
@@ -527,7 +585,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p_es.add_argument("title", nargs="?",
-                     help="exact session title (use 'list-sessions' to see them); omit when using --all")
+                     help="exact session title, or a cliSessionId / unique prefix "
+                          "(use 'list-sessions' to see them); omit when using --all")
     p_es.add_argument("--all", action="store_true",
                      help="export every visible session in the target cwd")
     p_es.add_argument("--cwd", default=DEFAULT_CWD,
