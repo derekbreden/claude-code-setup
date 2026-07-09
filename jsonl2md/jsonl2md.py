@@ -24,8 +24,11 @@ Two sources, each with a list verb and an export verb, plus a standalone rendere
 Desktop-app sessions are discovered from Claude.app's metadata at
     ~/Library/Application Support/Claude/claude-code-sessions/<workspace>/<device>/local_*.json
 VSCode-extension sessions carry no such titled record; they're discovered from
-the CLI's per-process descriptors at
+the running-process descriptors at
     ~/.claude/sessions/<pid>.json          (entrypoint == "claude-vscode")
+and named from the VSCode extension's own live state (the open Claude tab's
+rename, else the sessions-sidebar label) at
+    ~/Library/Application Support/Code/User/workspaceStorage/*/state.vscdb
 Both resolve to transcripts at
     ~/.claude/projects/<cwd-with-slashes-as-dashes>/<cliSessionId>.jsonl
 Chats are fetched from claude.ai using cookies decrypted from the desktop app's cookie store.
@@ -46,6 +49,7 @@ from urllib.request import Request, urlopen
 DEFAULT_CWD = "/Users/derekbredensteiner/Developer/homesodamachine"
 META_ROOT = os.path.expanduser("~/Library/Application Support/Claude/claude-code-sessions")
 SESSIONS_ROOT = os.path.expanduser("~/.claude/sessions")
+VSCODE_WS_STORAGE = os.path.expanduser("~/Library/Application Support/Code/User/workspaceStorage")
 JSONL_ROOT = os.path.expanduser("~/.claude/projects")
 RELAY_INBOX_ROOT = os.path.expanduser("~/.claude/hooks/relay-inbox")
 CLAUDE_APP_DIR = os.path.expanduser("~/Library/Application Support/Claude")
@@ -208,36 +212,114 @@ def resolve_target(positional, cwd):
     sys.exit(1)
 
 
-def list_vscode_sessions(target_cwd):
-    """VSCode-extension sessions for target_cwd, from the CLI's per-process
-    descriptors at ~/.claude/sessions/<pid>.json (entrypoint 'claude-vscode').
+def _read_vscode_item(db_path, key):
+    """Read one ItemTable value from a VSCode state.vscdb as parsed JSON. Opened
+    read-only so it's safe to read while VSCode holds the DB open (WAL readers
+    don't block writers). Returns None on any error or missing key."""
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+    try:
+        row = con.execute("SELECT value FROM ItemTable WHERE key=?", (key,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        con.close()
+    try:
+        return json.loads(row[0]) if row else None
+    except (ValueError, TypeError):
+        return None
 
-    These carry no user title — the desktop app's renaming never touches them —
-    so we synthesize a self-labeling one ('VSCode Extension - <id8>') and shape
-    the dict like a desktop session, so export/delta/watch/send treat it
-    identically. lastActivityAt is the transcript's mtime (the descriptor's
-    startedAt is only the process start). Descriptors whose transcript hasn't
-    been written yet are skipped."""
-    out = []
+
+def _iter_open_panel_titles(node):
+    """Walk the serialized editor layout (memento/workbench.parts.editor),
+    yielding (cliSessionId, tabTitle) for every open Claude webview panel. The
+    session id lives in the webview's own persisted state ({"sessionID": ...});
+    the tab title is exactly what you renamed the session to, updated the moment
+    you rename it — so this is the freshest name for a currently-open session."""
+    if isinstance(node, dict):
+        if node.get("type") == "leaf":
+            for e in node.get("data", {}).get("editors", []) or []:
+                try:
+                    v = json.loads(e.get("value", ""))
+                except (ValueError, TypeError):
+                    continue
+                if v.get("viewType") != "mainThreadWebview-claudeVSCodePanel":
+                    continue
+                try:
+                    sid = json.loads(v.get("state", "")).get("sessionID")
+                except (ValueError, TypeError, AttributeError):
+                    sid = None
+                if sid and v.get("title"):
+                    yield sid, v["title"]
+        for v in node.values():
+            yield from _iter_open_panel_titles(v)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _iter_open_panel_titles(v)
+
+
+def vscode_session_names():
+    """Read the VSCode extension's own state (every workspace's state.vscdb) and
+    return (open_titles, cached_labels), each mapping cliSessionId -> name:
+
+      open_titles   currently-open Claude tabs, keyed by session id from the
+                    webview state; the title is your live rename. Small set.
+      cached_labels the sessions-sidebar model cache's `label` for every session
+                    it remembers — the durable name, used only as a fallback
+                    (it can't be told apart from an auto-generated summary, so it
+                    never drives which sessions get listed).
+
+    An open tab's title always wins over its cached label."""
+    open_titles, cached_labels = {}, {}
+    for db in glob.glob(os.path.join(VSCODE_WS_STORAGE, "*", "state.vscdb")):
+        cache = _read_vscode_item(db, "agentSessions.model.cache")
+        if isinstance(cache, list):
+            for e in cache:
+                if not isinstance(e, dict):
+                    continue
+                res, lab = e.get("resource", ""), e.get("label")
+                if res.startswith("claude-code:/") and lab:
+                    cached_labels.setdefault(res.split("/", 1)[1], lab)
+        for sid, title in _iter_open_panel_titles(
+                _read_vscode_item(db, "memento/workbench.parts.editor")):
+            open_titles[sid] = title
+    return open_titles, cached_labels
+
+
+def list_vscode_sessions(target_cwd):
+    """VSCode-extension sessions for target_cwd, titled by the name YOU gave them
+    in VSCode so they're addressable interchangeably (e.g. `relay Garbage`).
+
+    Membership is the set of sessions you currently have going — running
+    claude-vscode processes (~/.claude/sessions/<pid>.json) plus any open Claude
+    tab — never the full sidebar history, so the list stays as curated as the
+    desktop titled list. Each is named from the VSCode extension's live state:
+    the open-tab rename, else the sidebar label, else a synthesized
+    'VSCode Extension - <id8>' if it was never named. Shaped like a desktop
+    session so export/delta/watch/send treat it identically; lastActivityAt is
+    the transcript mtime. A session id whose transcript isn't under target_cwd
+    is dropped (that's the cwd filter)."""
+    open_titles, cached_labels = vscode_session_names()
+    ids = set(open_titles)
     for p in glob.glob(f"{SESSIONS_ROOT}/*.json"):
         try:
             m = json.load(open(p))
         except Exception:
             continue
-        if m.get("entrypoint") != "claude-vscode" or m.get("cwd") != target_cwd:
-            continue
-        sid = m.get("sessionId")
-        if not sid:
-            continue
-        jsonl = jsonl_path_for(sid, target_cwd)
+        if m.get("entrypoint") == "claude-vscode" and m.get("cwd") == target_cwd and m.get("sessionId"):
+            ids.add(m["sessionId"])
+    out = []
+    for sid in ids:
         try:
-            last = int(os.path.getmtime(jsonl) * 1000)
+            last = int(os.path.getmtime(jsonl_path_for(sid, target_cwd)) * 1000)
         except OSError:
-            continue  # descriptor for a session with no transcript yet
+            continue  # no transcript under target_cwd -> not this project's session
         out.append({
             "cliSessionId": sid,
             "cwd": target_cwd,
-            "title": f"VSCode Extension - {sid[:8]}",
+            "title": open_titles.get(sid) or cached_labels.get(sid) or f"VSCode Extension - {sid[:8]}",
             "titleSource": "vscode",
             "isArchived": False,
             "lastActivityAt": last,
