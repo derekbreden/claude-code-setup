@@ -6,8 +6,8 @@
 #
 # Residue = the author going beyond describing what is, to explain, defend, or
 # narrate. See $HOME/Developer/homesodamachine/calibration/Principle.md for the
-# discipline; You.md and Framing.md in the same directory carry the live
-# calibration the principle is distilled from.
+# discipline; principle/You.md and principle/Framing.md alongside it carry the
+# live calibration the principle is distilled from.
 #
 # Diagnostic log: every invocation appends one JSONL line to
 # $HOME/.claude/hooks/logs/residue.jsonl with a "status" field.
@@ -222,7 +222,7 @@ elif [[ "$classification" == "residue" ]]; then
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "deny",
-      "permissionDecisionReason": "Before continuing, read /Users/derekbredensteiner/Developer/homesodamachine/calibration/Principle.md and the conversations it points at (You.md and Framing.md, in the same directory). What you were about to write was caught as residue. Read those files first, then look at what you wrote. If after reading you still want to write what you had, retry — this hook bothers you once per session, not twice."
+      "permissionDecisionReason": "Before continuing, read /Users/derekbredensteiner/Developer/homesodamachine/calibration/Principle.md and the conversations it points at (principle/You.md and principle/Framing.md, alongside it). What you were about to write was caught as residue. Read those files first, then look at what you wrote. If after reading you still want to write what you had, retry — this hook bothers you once per session, not twice."
     }
   }'
 else
