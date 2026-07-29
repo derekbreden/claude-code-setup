@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Block underived measurements — bare dimensional literals that should be docgen
-# markers — in prose being written or edited. A measurement that is a dimension
-# of a part THIS project fabricates can be derived from a source constant; hand-
-# writing the number lets it drift from the geometry. Two-stage detection: a
-# cheap regex pre-filter for measurement-shaped literals (Markdown prose, or the
+# Flag underived measurements — bare dimensional literals that should be docgen
+# markers — in prose that was written or edited. A measurement that is a
+# dimension of a part THIS project fabricates can be derived from a source
+# constant; hand-writing the number lets it drift from the geometry. Runs after
+# the write lands, so the note arrives as context rather than a denial — the
+# measurement is on disk and the agent revises it. Two-stage detection: a cheap
+# regex pre-filter for measurement-shaped literals (Markdown prose, or the
 # comment portion of .py/.scad), then Haiku disambiguation that splits a
 # derivable project dimension from a legitimately-literal external value.
 #
-# Fail-open: the only outcome that blocks is a clean Haiku "derivable"
-# classification. Any error, timeout, missing key, or look-alike allows the
-# write. Nudges once per session, then passes through.
+# Fail-open: the only outcome that says anything is a clean Haiku "derivable"
+# classification. Any error, timeout, missing key, or look-alike stays quiet.
+# Nudges once per session, then passes through.
 #
 # Applies only inside a repo that carries tools/docgen (the marker substitution
-# engine the deny message points at); bails silently anywhere else.
+# engine the note points at); bails silently anywhere else.
 #
 # Diagnostic log: every invocation appends one JSONL line to
 # $HOME/.claude/hooks/logs/measurement.jsonl with a "status" field. After a Haiku
@@ -231,12 +233,11 @@ elif [[ "$classification" == derivable* ]]; then
     log_status "lost_claim_race" "$(jq -nc --arg session "$session_marker" --arg file "$file_path" '{session: $session, file: $file}')"
     exit 0
   fi
-  log_status "blocked" "$(jq -nc --arg classification "$classification" --arg raw "$raw_reply" --arg file "$file_path" --arg session "$session_marker" --arg window "$window_log" '{classification: $classification, raw: $raw, file: $file, session: $session, window: $window}')"
+  log_status "flagged" "$(jq -nc --arg classification "$classification" --arg raw "$raw_reply" --arg file "$file_path" --arg session "$session_marker" --arg window "$window_log" '{classification: $classification, raw: $raw, file: $file, session: $session, window: $window}')"
   jq -n --arg repo "$repo_root" '{
     "hookSpecificOutput": {
-      "hookEventName": "PreToolUse",
-      "permissionDecision": "deny",
-      "permissionDecisionReason": ("This looks like a measurement \($repo) fabricates, so the hand-written number can drift from the geometry. If this project computes this dimension, write it as a docgen marker — [value](TAG) in the comment or doc, fed from the source constant (see \($repo)/tools/docgen and existing markers, e.g. reservoir.py). If it is an external spec, an imperial equivalent, a fastener size, or a raw measurement, retry — this fires once per session, not twice.")
+      "hookEventName": "PostToolUse",
+      "additionalContext": ("The measurement you just wrote is already on disk, and it looks like one \($repo) fabricates, so the hand-written number can drift from the geometry. If this project computes this dimension, go back and write it as a docgen marker — [value](TAG) in the comment or doc, fed from the source constant (see \($repo)/tools/docgen and existing markers, e.g. reservoir.py). If it is an external spec, an imperial equivalent, a fastener size, or a raw measurement, leave it — this fires once per session, not twice.")
     }
   }'
 else

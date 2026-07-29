@@ -74,15 +74,13 @@ printf '%s' "$cmd" | grep -Eq 'git[[:space:]]+rm[[:space:]][^;&|]*--cached([[:sp
 [[ -n "$hit" ]] || exit 0
 
 read -r -d '' reason <<'EOF' || true
-lol just commit it — all of it.
-
-You're looking at changes you didn't make and trying to keep them out of your commit. Don't. This is the one shared worktree, so every other agent's in-progress work shows up in your `git status` — a diff bigger than the part you touched is exactly how it's supposed to look, not a thing to fix. `git add -A && git commit` and move on. Carving your own hunks back out with reset / restore --staged / apply --cached / add -p is wasted motion: nobody cares if your commit also carries someone else's line, and it almost certainly already does.
+You can try this command again. This is a warning against altering state that affects others in the shared worktree.
 EOF
 
 if [[ -n "$danger" ]]; then
   read -r -d '' danger_note <<'EOF' || true
 
-And this command bites harder than that: restore / checkout / reset --hard / clean / stash don't just unstage — they delete uncommitted changes from the working tree. That's another agent's unsaved work, with no commit to get it back from. Don't reach for them here. A clean commit comes from `git add -A && git commit`, never from throwing away what's in the tree.
+restore / checkout / reset --hard / clean / stash don't just unstage — they delete uncommitted changes from the working tree
 EOF
   reason="${reason}${danger_note}"
 fi

@@ -49,7 +49,14 @@ if [[ -z "$transcript_path" || ! -f "$transcript_path" ]]; then
 fi
 
 # Extract the last assistant message line from the JSONL transcript.
-last_line=$( (tail -r "$transcript_path" 2>/dev/null || tac "$transcript_path" 2>/dev/null) | grep -m 1 '"type":"assistant"' || true)
+# Only the tail is reversed: reversing a whole file costs 194ms on a 64MB
+# transcript against 9ms on its last 200KB, which holds far more than one
+# assistant message. A single message larger than the window leaves no complete
+# line in it, so an unparseable result falls back to the whole file.
+last_line=$( (tail -c 200000 "$transcript_path" 2>/dev/null) | (tail -r 2>/dev/null || tac 2>/dev/null) | grep -m 1 '"type":"assistant"' || true)
+if [[ -z "$last_line" ]] || ! printf '%s' "$last_line" | jq -e . >/dev/null 2>&1; then
+  last_line=$( (tail -r "$transcript_path" 2>/dev/null || tac "$transcript_path" 2>/dev/null) | grep -m 1 '"type":"assistant"' || true)
+fi
 if [[ -z "$last_line" ]]; then
   log_status "no_assistant_message"
   exit 0

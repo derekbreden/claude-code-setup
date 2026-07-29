@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Block residue (justification, defense, decision narrative) in files being
-# written or edited. Two-stage detection: cheap regex pre-filter on the new
-# content, then Haiku disambiguation on the candidate region. Fail-open on any
-# error.
+# Flag residue (justification, defense, decision narrative) in files that were
+# written or edited. Runs after the write lands, so the note arrives as context
+# rather than a denial — the edit is on disk and the agent revises it. Two-stage
+# detection: cheap regex pre-filter on the new content, then Haiku
+# disambiguation on the candidate region. Fail-open on any error.
 #
 # Residue = the author going beyond describing what is, to explain, defend, or
 # narrate. See $HOME/Developer/homesodamachine/calibration/Principle.md for the
@@ -18,10 +19,6 @@ CALIBRATION_DIR="$HOME/Developer/homesodamachine/calibration"
 LOG_FILE="$HOME/.claude/hooks/logs/residue.jsonl"
 WARNED_DIR="$HOME/.claude/hooks/state"
 mkdir -p "$(dirname "$LOG_FILE")" "$WARNED_DIR" 2>/dev/null || true
-
-# Garbage-collect stale per-session warned markers (older than 7 days). The
-# markers are empty files, but the directory shouldn't grow without bound.
-find "$WARNED_DIR" -type f -name 'residue-warned-*' -mtime +7 -delete 2>/dev/null || true
 
 log_status() {
   local status="$1"
@@ -211,18 +208,22 @@ classification=$(printf '%s' "$response" | jq -r '.content[0].text // empty' | t
 if [[ -z "$classification" ]]; then
   log_status "haiku_no_response"
 elif [[ "$classification" == "residue" ]]; then
+  # Garbage-collect stale per-session warned markers (older than 7 days). The
+  # markers are empty files, but the directory shouldn't grow without bound.
+  # Runs here rather than at entry: the directory only grows on the path that
+  # writes a marker, and every invocation paid for the sweep at entry.
+  find "$WARNED_DIR" -type f -name 'residue-warned-*' -mtime +7 -delete 2>/dev/null || true
   # Mark this session as warned. Subsequent residue writes in the same
   # session will pass through — the agent has the calibration context now
   # and the decision is theirs.
   if [[ -n "$session_marker" ]]; then
     touch "$WARNED_DIR/residue-warned-$session_marker" 2>/dev/null || true
   fi
-  log_status "blocked" "$(jq -nc --arg classification "$classification" --arg file "$file_path" --arg session "$session_marker" '{classification: $classification, file: $file, session: $session}')"
+  log_status "flagged" "$(jq -nc --arg classification "$classification" --arg file "$file_path" --arg session "$session_marker" '{classification: $classification, file: $file, session: $session}')"
   jq -n '{
     "hookSpecificOutput": {
-      "hookEventName": "PreToolUse",
-      "permissionDecision": "deny",
-      "permissionDecisionReason": "Before continuing, read /Users/derekbredensteiner/Developer/homesodamachine/calibration/Principle.md and the conversations it points at (principle/You.md and principle/Framing.md, alongside it). What you were about to write was caught as residue. Read those files first, then look at what you wrote. If after reading you still want to write what you had, retry — this hook bothers you once per session, not twice."
+      "hookEventName": "PostToolUse",
+      "additionalContext": "The edit you just made was caught as residue, and it is already on disk. Read /Users/derekbredensteiner/Developer/homesodamachine/calibration/Principle.md and the conversations it points at (principle/You.md and principle/Framing.md, alongside it). Then look at what you wrote and revise it if it needs revising — if after reading you still want what you had, leave it. This hook bothers you once per session, not twice."
     }
   }'
 else
