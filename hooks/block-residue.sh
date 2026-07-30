@@ -299,7 +299,7 @@ opus_body=$(jq -n \
   --arg edit "$raw_new_content" \
   '{
     model: $model,
-    max_tokens: 6000,
+    max_tokens: 16000,
     messages: [{role: "user", content: (
       $instr
       + "\n\n<calibration>\n" + $cal + "</calibration>\n\n"
