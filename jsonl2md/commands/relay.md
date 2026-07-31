@@ -25,4 +25,4 @@ Steps:
 
 Pull one session per invocation. Read-only: this never writes to, messages, or disturbs the source session.
 
-To send a message the other way — interject into another live session — use `/relay-send`.
+To send a message the other way — interject into a live session — use `/relay-send`. That one is model-invocable, so if this relay leaves you with something the other session needs in order to act, sending it is yours to do; its own body carries the rules for when. (This command is not: pulling a transcript is the user's call, because it lands a whole session in your context.)
