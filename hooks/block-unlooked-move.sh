@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
-# Stop hook: block a turn whose last edit to the enclosure's placement (_contents.py) or routing
-# (_lines.py) came after its last look.
+# Stop hook: in a turn that edited the enclosure's placement (_contents.py) or routing
+# (_lines.py), block unless the last look is newer than those files' newest mtime.
 #
-# A look is a render-view.js or look.sh run, or a Read of a .png. The condition clears on the
-# next look; the stop_hook_active guard holds a turn to one block.
+# The mtime is the authority and the transcript supplies only this session's history, so a look
+# taken before ANY agent's edit is stale — several sessions share one working tree, and a body
+# moves under a render that has already been taken. A look is a render-view.js or look.sh run,
+# or a Read of a .png. The condition clears on the next look; the stop_hook_active guard holds
+# a turn to one block.
+#
+# A session that edited nothing passes, so another agent's edit alone does not block a turn.
 #
 # Scoped to a repo carrying tools/render/render-view.js, silent elsewhere. Fail-open.
 #
@@ -58,13 +63,14 @@ if [[ -z "$repo" ]]; then
   exit 0
 fi
 
-# One marker per relevant tool call, in transcript order — one token per record, where a command
-# carrying newlines would span lines.
+# One marker per relevant tool call, each carrying the turn's epoch — one record per line, where
+# a command carrying newlines would span lines.
 #
 #   EDIT — placement (_contents.py) or routing (_lines.py) was changed
 #   LOOK — a render was taken, or a rendered .png was read
 markers=$(jq -r '
   select(.type == "assistant")
+  | (.timestamp // "") as $ts
   | (.message.content // [])[]
   | select(.type == "tool_use")
   | if (.name | test("^(Edit|Write|MultiEdit|NotebookEdit)$"))
@@ -76,27 +82,46 @@ markers=$(jq -r '
     then "LOOK"
     else empty
     end
+  | . + " " + ((try ($ts | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) catch 0) | tostring)
 ' "$transcript_path" 2>/dev/null || true)
 
-if [[ -z "$markers" ]]; then
+edits=$(printf '%s\n' "$markers" | grep -c '^EDIT ' || true)
+if [[ "${edits:-0}" -eq 0 ]]; then
   log_status "no_placement_edits"
   exit 0
 fi
 
-last=$(printf '%s\n' "$markers" | grep -E '^(EDIT|LOOK)$' | tail -n 1)
-edits=$(printf '%s\n' "$markers" | grep -c '^EDIT$' || true)
-looks=$(printf '%s\n' "$markers" | grep -c '^LOOK$' || true)
+looks=$(printf '%s\n' "$markers" | grep -c '^LOOK ' || true)
+last_look=$(printf '%s\n' "$markers" | awk '$1 == "LOOK" { t = $2 } END { print t + 0 }')
 
-if [[ "$last" != "EDIT" ]]; then
-  log_status "looked" "$(jq -nc --argjson e "${edits:-0}" --argjson l "${looks:-0}" '{edits: $e, looks: $l}')"
+# Newest mtime of the placement and routing source anywhere in the repo — every edition's copy,
+# by whichever agent last wrote it.
+src_mtime=$(find "$repo" \( -name node_modules -o -name .git \) -prune -o \
+  -type f \( -name '_contents.py' -o -name '_lines.py' \) -print 2>/dev/null \
+  | while IFS= read -r f; do stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null; done \
+  | sort -n | tail -n 1)
+src_mtime=${src_mtime:-0}
+
+extra=$(jq -nc --argjson e "${edits:-0}" --argjson l "${looks:-0}" \
+  --argjson look "${last_look:-0}" --argjson src "${src_mtime:-0}" \
+  '{edits: $e, looks: $l, last_look: $look, src_mtime: $src}')
+
+if [[ "$last_look" -ge "$src_mtime" ]]; then
+  log_status "looked" "$extra"
   exit 0
 fi
 
-log_status "blocked" "$(jq -nc --argjson e "${edits:-0}" --argjson l "${looks:-0}" '{edits: $e, looks: $l}')"
+log_status "blocked" "$extra"
 
-reason="You moved a body and have not looked at it.
+if [[ "${looks:-0}" -eq 0 ]]; then
+  headline="You moved a body and have not looked at it."
+else
+  headline="Your look is stale — placement or routing source was written after it, which in this tree may have been another session."
+fi
 
-This turn edited _contents.py or _lines.py, and no render was taken after that edit. The tables report bounding boxes.
+reason="${headline}
+
+This turn edited _contents.py or _lines.py. The tables report bounding boxes.
 
     tools/look.sh <body>[,<body>...]        e.g. tools/look.sh fluid-23,fluid-27
 
