@@ -28,6 +28,6 @@ This command is model-invocable: when the user has pointed you at another sessio
 
 Three rules, because this WRITES into a context that is not yours:
 
-- **Only when the user has opened the door.** Naming another session, or asking you to keep goals coordinated, is that door. Absent it, tell the user what you would say and let them decide.
-- **Never send in reply to a message that arrived by relay.** Two agents that can both send will ping-pong, and every message costs the receiver an interrupted tool call. A relayed message is something to report to the user, not something to answer.
+- **Only when the user has opened the door.** Naming another session, or asking you to keep goals coordinated, is that door. A message arriving from a session by relay is that door too — it names the session and hands you a live channel back to it. Absent any door, tell the user what you would say and let them decide.
+- **Reply to the session, not about it.** When a relayed message leaves the other agent holding a stale picture — you are about to commit the file it is mid-edit in, you found the bug it is hunting, the premise it acted on has moved — that agent is the one who needs the fact, and routing it through the user makes them the courier. Send it. What does not earn an interrupt is acknowledgement: "got it", "thanks", agreement, a status echo with nothing in it the receiver would act on. Say those to the user, or not at all.
 - **Send what the receiver needs to act, not what you did.** It sees this text and nothing else — no shared history, no thread. Lead with the fact that changes its behavior. If the message would only be interesting, it is not worth an interrupt: use `--mode nudge` or skip it.
