@@ -1,6 +1,6 @@
 # claude-code-hooks
 
-Claude Code hooks. Three Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question. Three PreToolUse hooks block specific writes: project memory files, content containing residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). A fourth PreToolUse hook runs on `Bash` and blocks branch creation, so work stays on `main` in the one shared worktree; a fifth, also on `Bash`, nudges once per session against flashing firmware with a dirty tree, so flashed binaries map to commits by default. A sixth runs on `WebFetch` and `WebSearch` and denies the first call of each (per tool, per session) with a redirect to Chrome MCP, which is far more reliable. One UserPromptSubmit hook injects context instead of blocking: when a prompt carries step-viewer pick text, it points the agent (once per session) at the format's home and at the fact the channel is two-way.
+Claude Code hooks. Four Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question, and reporting on an enclosure body that was moved and not looked at. Three PreToolUse hooks block specific writes: project memory files, content containing residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). A fourth PreToolUse hook runs on `Bash` and blocks branch creation, so work stays on `main` in the one shared worktree; a fifth, also on `Bash`, nudges once per session against flashing firmware with a dirty tree, so flashed binaries map to commits by default. A sixth runs on `WebFetch` and `WebSearch` and denies the first call of each (per tool, per session) with a redirect to Chrome MCP, which is far more reliable. One UserPromptSubmit hook injects context instead of blocking: when a prompt carries step-viewer pick text, it points the agent (once per session) at the format's home and at the fact the channel is two-way.
 
 This is a personal tool, put on GitHub in case it helps someone running similar configurations. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
 
@@ -20,15 +20,17 @@ You will *not* get value from this if:
 
 ## The hooks
 
-### Stop hooks (regex + Haiku two-stage)
+### Stop hooks
 
-These run after each assistant turn. Each one runs a cheap regex pre-filter against the last assistant message; if it matches, a windowed snippet goes to Claude Haiku for disambiguation; if Haiku confirms the targeted pattern, the turn is blocked with a `reason` returned to the assistant.
+These run after each assistant turn. The first three are regex + Haiku two-stage; the fourth reads an ordering out of the transcript and has no Haiku stage. Each one runs a cheap regex pre-filter against the last assistant message; if it matches, a windowed snippet goes to Claude Haiku for disambiguation; if Haiku confirms the targeted pattern, the turn is blocked with a `reason` returned to the assistant.
 
 - **`block-effort-estimate.sh`** — catches phrasings like "this'll take a day", "maybe a few hours", "weeks not months", "a couple of weeks". An effort estimate from an LLM is not tied to reality: it is pattern-matched from training data, where humans wrote estimates of work they were doing — work the LLM will do entirely differently. The block message asks the assistant to rewrite without one.
 
 - **`block-unexplained-hedge.sh`** — catches "I'm not sure", "I might be wrong", "this could be off" when the assistant doesn't name the underlying concern. The block message asks the assistant to explain the concern rather than remove the hedge. Substantive hedges (where the concern is named) pass through; social/habitual hedges get blocked.
 
 - **`block-question-as-disagreement.sh`** — catches "I notice X — was that intended?" / "Did you mean to Y?" / "Is that on purpose?" when the assistant frames a structural disagreement as a question. The block message asks the assistant to state the disagreement directly. Genuine information-gathering questions pass through; disagreement framed as a question gets blocked.
+
+- **`block-unlooked-move.sh`** — blocks a turn whose last edit to the enclosure's placement (`_contents.py`) or routing (`_lines.py`) came after its last look. A look is a `render-view.js` or `look.sh` run, or a `Read` of a `.png`. No Haiku stage: the markers are a file path and a tool name, read out of the transcript in order, and the verdict is which kind came last. The block message carries the `tools/look.sh <body>` invocation, names the elevations the assembly builds beside its STEP, and points at `calibration/Fences.md`. Scoped to a repo carrying `tools/render/render-view.js`; silent elsewhere. The condition clears on the next look, and `stop_hook_active` holds a turn to one block. 0.4 s against a 64 MB transcript.
 
 ### PreToolUse hooks
 
@@ -75,6 +77,7 @@ The three Stop hooks, `block-residue.sh`, and `block-underived-measurement.sh` e
 - `regex_no_match` — pre-filter didn't match; **Stop-hook log lines include `last_400_chars` of the response so you can see what slipped through**
 - `no_api_key` — `~/.claude/anthropic_api_key` is missing
 - `haiku_no_response` — Haiku call made but empty response (timeout, network failure, etc.)
+- `no_render_repo` / `no_placement_edits` / `looked` — outside a repo with the renderer, no placement or routing edit in the transcript, or a look came after the last edit (`block-unlooked-move.sh`; the `looked` and `blocked` lines carry `edits` and `looks` counts)
 - `allowed` — Haiku classified as the look-alike; no block emitted
 - `blocked` — Haiku classified as the targeted pattern; block was emitted
 
@@ -116,5 +119,6 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 - `hooks/block-branch.sh` — branch-creation hook (PreToolUse on Bash, command-pattern match)
 - `hooks/block-flash-before-commit.sh` — flash-guard hook (PreToolUse on Bash, command-pattern match + `git status --porcelain` dirty check)
 - `hooks/block-web.sh` — web-tool-redirect hook (PreToolUse on WebFetch|WebSearch, once-per-session-per-tool nudge to Chrome MCP)
+- `hooks/block-unlooked-move.sh` — unlooked-move hook (Stop, transcript ordering, no Haiku stage)
 - `hooks/note-pick-text.sh` — step-viewer pick-text note (UserPromptSubmit, once-per-session context injection)
-- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all ten hooks
+- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all eleven hooks
