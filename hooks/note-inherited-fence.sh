@@ -59,6 +59,15 @@ case "$event" in
       exit 0
     fi
     text=$(printf '%s' "$input" | jq -r '[.tool_response | .. | strings] | join("\n")' 2>/dev/null || true)
+    # A background launch returns an acknowledgement, not a report — and the brief that
+    # launched it quotes the very limit shapes this hook looks for, so judging one spends
+    # the session's single note on a message carrying no conclusion at all. The report
+    # arrives later, as its own event.
+    if [[ "$text" == *"Async agent launched successfully"* \
+       || "$text" == *"The agent is working in the background"* ]]; then
+      log_status "launch_not_report"
+      exit 0
+    fi
     ;;
   UserPromptSubmit)
     text=$(printf '%s' "$input" | jq -r '.prompt // empty')
@@ -108,7 +117,9 @@ if [[ -n "$session_marker" ]]; then
   fi
 fi
 
-log_status "noted" "$(jq -nc --arg event "$event" '{event: $event}')"
+matched=$(printf '%s\n' "$text" | grep -oE "$pattern" | head -3 | tr '\n' ';')
+log_status "noted" "$(jq -nc --arg event "$event" --arg matched "$matched" \
+  --arg head "${text:0:300}" '{event: $event, matched: $matched, head: $head}')"
 
 note="The report that just arrived carries a limit claim — impossible / no room / pinned / the only / envelope. A conclusion inside another agent's report is an inherited fence (calibration/Fences.md — The inherited fence): it was produced by an agent with your failure mode, and relaying it onward unprobed makes you its second author. Before accumulating it as a tie or handing it up: does the claim name what would have to move and what moving it costs, or only the pins of the current arrangement? For a run, what do its two ends actually need — the enclosure's need.py prints span, axis split and detour per run — and does the run belong in the region it is blocked in at all? If the claim already carries its price, carry on — this fires once a session."
 
