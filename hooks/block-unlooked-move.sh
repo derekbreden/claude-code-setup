@@ -5,11 +5,10 @@
 # The mtime is the authority and the transcript supplies only this session's history, so a look
 # taken before ANY agent's edit is stale — several sessions share one working tree, and a body
 # moves under a render that has already been taken. A look is a render-view.js or look.sh run,
-# or a Read of a .png. The condition clears on the next look; the stop_hook_active guard holds
-# a turn to one block.
+# or a Read of a .png.
 #
-# A session that edited nothing passes, so another agent's edit alone does not block a turn. The
-# stale half says its piece once a session, where the never-looked half repeats.
+# A session that edited nothing passes, so another agent's edit alone does not block a turn.
+# Fires once a session, as the hooks that hand over calibration do.
 #
 # The message names the build when the exported .step predates the edit — the renderer reads that
 # .step, so a look before a build carries the previous geometry — and it names the way past for an
@@ -124,20 +123,22 @@ if [[ "$last_look" -ge "$src_mtime" ]]; then
   exit 0
 fi
 
+# Once a session. The context is handed over on the turn where it applies, and an agent that has
+# it has it.
+WARNED_DIR="$HOME/.claude/hooks/state"
+mkdir -p "$WARNED_DIR" 2>/dev/null || true
+find "$WARNED_DIR" -type f -name 'unlooked-warned-*' -mtime +7 -delete 2>/dev/null || true
+session_marker=$(basename "$transcript_path" .jsonl)
+if [[ -n "$session_marker" && -f "$WARNED_DIR/unlooked-warned-$session_marker" ]]; then
+  log_status "already_warned_this_session" "$extra"
+  exit 0
+fi
+[[ -n "$session_marker" ]] && touch "$WARNED_DIR/unlooked-warned-$session_marker" 2>/dev/null || true
+
 if [[ "${looks:-0}" -eq 0 ]]; then
   headline="You moved a body and have not looked at it."
 else
   headline="Your look is stale — placement or routing source was written after it, which in this tree may have been another session."
-  # A tree several sessions write to goes stale again on its own, so this half says its piece once.
-  WARNED_DIR="$HOME/.claude/hooks/state"
-  mkdir -p "$WARNED_DIR" 2>/dev/null || true
-  find "$WARNED_DIR" -type f -name 'unlooked-warned-*' -mtime +7 -delete 2>/dev/null || true
-  session_marker=$(basename "$transcript_path" .jsonl)
-  if [[ -n "$session_marker" && -f "$WARNED_DIR/unlooked-warned-$session_marker" ]]; then
-    log_status "already_warned_this_session" "$extra"
-    exit 0
-  fi
-  [[ -n "$session_marker" ]] && touch "$WARNED_DIR/unlooked-warned-$session_marker" 2>/dev/null || true
 fi
 
 log_status "blocked" "$extra"
@@ -162,9 +163,9 @@ Three orthographic views, subject solid, everything else in frame as edges, on a
 
 What the tables do not carry: whether the part occupies the space its box claims, whether two lines cross where swapping their ports would let them run parallel, whether a face is nearly-but-not flush with its neighbour.
 
-More in calibration/Fences.md. This clears on the next look.
+More in calibration/Fences.md.
 ${build_note}
-If this edit moved no geometry — a comment, a rename, a revert, a registry note — say which and finish. This fires once per turn."
+Not every edit here moves a body — a comment, a rename, a revert, a registry note all leave the geometry where it was. This fires once a session, so if that was this one, carry on."
 
 jq -n --arg reason "$reason" '{"decision": "block", "reason": $reason}'
 exit 0
