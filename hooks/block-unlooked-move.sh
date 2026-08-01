@@ -8,7 +8,12 @@
 # or a Read of a .png. The condition clears on the next look; the stop_hook_active guard holds
 # a turn to one block.
 #
-# A session that edited nothing passes, so another agent's edit alone does not block a turn.
+# A session that edited nothing passes, so another agent's edit alone does not block a turn. The
+# stale half says its piece once a session, where the never-looked half repeats.
+#
+# The message names the build when the exported .step predates the edit — the renderer reads that
+# .step, so a look before a build carries the previous geometry — and it names the way past for an
+# edit that moved no geometry, which a comment, a rename, a revert and a registry note all are.
 #
 # Scoped to a repo carrying tools/render/render-view.js, silent elsewhere. Fail-open.
 #
@@ -102,21 +107,49 @@ src_mtime=$(find "$repo" \( -name node_modules -o -name .git \) -prune -o \
   | sort -n | tail -n 1)
 src_mtime=${src_mtime:-0}
 
+# The renderer reads the exported .step. Until a build runs, a look shows the geometry before
+# this edit.
+step_mtime=$(find "$repo" \( -name node_modules -o -name .git \) -prune -o \
+  -type f -name 'enclosure-assembly.step' -print 2>/dev/null \
+  | while IFS= read -r f; do stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null; done \
+  | sort -n | tail -n 1)
+step_mtime=${step_mtime:-0}
+
 extra=$(jq -nc --argjson e "${edits:-0}" --argjson l "${looks:-0}" \
-  --argjson look "${last_look:-0}" --argjson src "${src_mtime:-0}" \
-  '{edits: $e, looks: $l, last_look: $look, src_mtime: $src}')
+  --argjson look "${last_look:-0}" --argjson src "${src_mtime:-0}" --argjson step "${step_mtime:-0}" \
+  '{edits: $e, looks: $l, last_look: $look, src_mtime: $src, step_mtime: $step}')
 
 if [[ "$last_look" -ge "$src_mtime" ]]; then
   log_status "looked" "$extra"
   exit 0
 fi
 
-log_status "blocked" "$extra"
-
 if [[ "${looks:-0}" -eq 0 ]]; then
   headline="You moved a body and have not looked at it."
 else
   headline="Your look is stale — placement or routing source was written after it, which in this tree may have been another session."
+  # A tree several sessions write to goes stale again on its own, so this half says its piece once.
+  WARNED_DIR="$HOME/.claude/hooks/state"
+  mkdir -p "$WARNED_DIR" 2>/dev/null || true
+  find "$WARNED_DIR" -type f -name 'unlooked-warned-*' -mtime +7 -delete 2>/dev/null || true
+  session_marker=$(basename "$transcript_path" .jsonl)
+  if [[ -n "$session_marker" && -f "$WARNED_DIR/unlooked-warned-$session_marker" ]]; then
+    log_status "already_warned_this_session" "$extra"
+    exit 0
+  fi
+  [[ -n "$session_marker" ]] && touch "$WARNED_DIR/unlooked-warned-$session_marker" 2>/dev/null || true
+fi
+
+log_status "blocked" "$extra"
+
+if [[ "$step_mtime" -lt "$src_mtime" ]]; then
+  build_note="
+The exported .step predates this edit, so a render right now shows the geometry before it. Build first:
+
+    tools/cad-venv/bin/python thin/hardware/printed-parts/enclosure/enclosure-assembly/enclosure_assembly.py
+"
+else
+  build_note=""
 fi
 
 reason="${headline}
@@ -129,7 +162,9 @@ Three orthographic views, subject solid, everything else in frame as edges, on a
 
 What the tables do not carry: whether the part occupies the space its box claims, whether two lines cross where swapping their ports would let them run parallel, whether a face is nearly-but-not flush with its neighbour.
 
-More in calibration/Fences.md. This clears on the next look."
+More in calibration/Fences.md. This clears on the next look.
+${build_note}
+If this edit moved no geometry — a comment, a rename, a revert, a registry note — say which and finish. This fires once per turn."
 
 jq -n --arg reason "$reason" '{"decision": "block", "reason": $reason}'
 exit 0
