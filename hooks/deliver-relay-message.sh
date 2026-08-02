@@ -43,16 +43,24 @@ shopt -u nullglob
 
 mode="nudge"
 body=""
+replies=""
 for f in "${files[@]}"; do
   mtext=$(jq -r '.text // empty' "$f" 2>/dev/null)
   mmode=$(jq -r '.mode // "interrupt"' "$f" 2>/dev/null)
   mfrom=$(jq -r '.from // empty' "$f" 2>/dev/null)
+  mrepl=$(jq -r '.reply_to // empty' "$f" 2>/dev/null)
   [[ -z "$mtext" ]] && continue
   [[ "$mmode" == "interrupt" ]] && mode="interrupt"
   if [[ -n "$mfrom" ]]; then
     body+="• (from ${mfrom}) ${mtext}"$'\n'
   else
     body+="• ${mtext}"$'\n'
+  fi
+  # A return address means the sender is WAITING on an answer, and is almost
+  # certainly parked on `await-reply` — which only ends when something lands in
+  # its mailbox. Not replying leaves it blocked until its timeout.
+  if [[ -n "$mrepl" ]]; then
+    replies+="  python3 \$HOME/Developer/claude-code-setup/jsonl2md/jsonl2md.py send ${mrepl} \"<your answer>\" --reply-to <your own id>"$'\n'
   fi
 done
 
@@ -64,6 +72,9 @@ rm -f "${files[@]}" 2>/dev/null || true
 
 header="📬 RELAYED MESSAGE — the user injected this into your session out-of-band, from a second Claude Code session watching your work. It is a direct interjection from the user; give it the same weight as anything the user types. Read it, then adjust course before continuing:"
 message="${header}"$'\n\n'"${body}"
+if [[ -n "$replies" ]]; then
+  message+=$'\n'"↩︎ THIS MESSAGE CARRIES A RETURN ADDRESS. The sender is parked on \`await-reply\` and nothing else will release it — an idle session cannot be woken, so silence blocks it until its timeout expires. If the message asks you anything, or your answer would change what it does, send one back:"$'\n'"${replies}"
+fi
 
 if [[ "$mode" == "interrupt" ]]; then
   jq -n --arg reason "$message" '{

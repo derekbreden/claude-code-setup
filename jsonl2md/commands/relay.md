@@ -28,3 +28,5 @@ Steps:
 Read-only: this never writes to, messages, or disturbs the source sessions.
 
 To send a message the other way — interject into a live session — use `/relay-send`. That one is model-invocable, so if this relay leaves you with something another session needs in order to act, sending it is yours to do; its own body carries the rules for when. (This command is not model-invocable: landing whole transcripts in your context is the user's call to make. That's about who starts a relay, not how many sessions one relay may carry.)
+
+If what you send asks a question, arm `await-reply` in the background before you stop — nothing wakes an idle session, so a reply you have not armed for is one you will never see. `/relay-send` carries the exact incantation.

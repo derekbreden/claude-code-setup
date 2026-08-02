@@ -592,11 +592,82 @@ def cmd_watch(args):
         sys.stderr.write(f"\n[watch] {label}: stopped (cursor not committed).\n")
 
 
+def own_session_id(explicit, cwd):
+    """The CALLER'S own session — the mailbox `await-reply` watches.
+
+    Never guessed. `send` resolves someone else's session and a wrong answer is loud
+    (the message lands in a stranger's context); this resolves the caller's own, and a
+    wrong answer is SILENT — you wait forever on a mailbox nobody writes to while the
+    reply sits in yours. "The most recently written transcript" is exactly wrong here:
+    the agent you are waiting on is the one writing, so freshness picks THEM. So this
+    takes a title or an id and nothing else, and the caller's id is discoverable without
+    guessing: it is the session-named directory in the scratchpad path the harness gives
+    every agent, `/tmp/claude-<uid>/<project>/<SESSION-ID>/scratchpad`."""
+    if not explicit:
+        env_id = os.environ.get("CLAUDE_SESSION_ID", "").strip()
+        if env_id:
+            return env_id, env_id
+        sys.stderr.write(
+            "await-reply needs the session whose mailbox to watch — YOUR OWN, not the one\n"
+            "you messaged. Pass its title or cliSessionId. An agent's own id is the\n"
+            "session-named directory in its scratchpad path:\n"
+            "  /tmp/claude-<uid>/<project>/<SESSION-ID>/scratchpad\n"
+            "This is not inferred, because the freshest transcript in a project is the\n"
+            "session you are waiting ON, not the one waiting.\n")
+        sys.exit(2)
+    return resolve_target(explicit, cwd)
+
+
+def cmd_await_reply(args):
+    """Block until this session's own mailbox has something in it, then exit.
+
+    The whole point is that a relayed conversation has no push. `send` drops a file and
+    the receiver's PreToolUse hook picks it up on its NEXT TOOL CALL — so an agent that
+    ends its turn asking a question has, by ending it, guaranteed it will never see the
+    answer. Nothing wakes an idle session. Run this in the background and its exit IS
+    the wake-up.
+
+    It does not drain the mailbox. Draining is the delivery hook's job, and letting it
+    keep that job is what makes the full text arrive properly framed on the next tool
+    call; this only prints enough to say who answered."""
+    cli_id, label = own_session_id(args.title, args.cwd)
+    box = os.path.join(RELAY_INBOX_ROOT, cli_id)
+    sys.stderr.write(f"[await-reply] watching {label} ({cli_id})\n[await-reply] mailbox: {box}\n")
+    deadline = (time.time() + args.timeout) if args.timeout else None
+    while True:
+        files = sorted(glob.glob(os.path.join(box, "*.json")))
+        if files:
+            senders, previews = [], []
+            for f in files:
+                try:
+                    with open(f) as fh:
+                        m = json.load(fh)
+                except Exception:
+                    continue
+                senders.append(m.get("from") or "unknown")
+                text = " ".join((m.get("text") or "").split())
+                previews.append(text[:200] + ("…" if len(text) > 200 else ""))
+            who = ", ".join(dict.fromkeys(senders)) or "unknown"
+            print(f"RELAY REPLY for {label} — {len(files)} message(s) from {who}")
+            for p in previews:
+                print(f"  {p}")
+            print("(full text arrives via the delivery hook on your next tool call)")
+            sys.stdout.flush()
+            return
+        if deadline and time.time() > deadline:
+            print(f"RELAY TIMEOUT for {label} — no reply after {args.timeout:g}s")
+            sys.stdout.flush()
+            return
+        time.sleep(args.interval)
+
+
 def cmd_send(args):
     cli_id, label = resolve_target(args.title, args.cwd)
     box = os.path.join(RELAY_INBOX_ROOT, cli_id)
     os.makedirs(box, exist_ok=True)
     msg = {"mode": args.mode, "text": args.text, "from": args.sender, "ts": time.time()}
+    if args.reply_to:
+        msg["reply_to"] = args.reply_to
     # Unique per-message file (maildir-style: no clobber, no lock). Write to a
     # .tmp the receiver's *.json glob ignores, then atomically rename it in.
     dst = os.path.join(box, f"{int(time.time() * 1000):013d}-{os.getpid()}.json")
@@ -608,6 +679,12 @@ def cmd_send(args):
         f"[relay] queued {args.mode} message for {label} ({cli_id}); "
         f"it lands on that session's next tool call.\n"
     )
+    if args.reply_to:
+        sys.stderr.write(
+            f"[relay] return address recorded: {args.reply_to}. Nothing will wake you when\n"
+            f"[relay] the answer comes — arm the watcher, in the BACKGROUND, before you stop:\n"
+            f"[relay]   {os.path.basename(__file__)} await-reply {args.reply_to} --timeout 3600\n"
+        )
     print(dst)
 
 
@@ -638,6 +715,12 @@ examples:
   jsonl2md.py send "Autorouter" "stop and reconsider whether fix 1 is still needed"
   jsonl2md.py send "Autorouter" "looks good, keep going" --mode nudge
 
+  # ...and hear back. Nothing wakes an idle session, so if you asked a question,
+  # arm the watcher IN THE BACKGROUND before you stop. Its exit is the wake-up.
+  jsonl2md.py send "Autorouter" "revert it?" --reply-to 5c12fda9-5e77-4a1e-894a-5f91d06cf0e4
+  jsonl2md.py await-reply 5c12fda9-5e77-4a1e-894a-5f91d06cf0e4 --timeout 3600
+  jsonl2md.py await-reply "My Session Title" --timeout 0     # wait indefinitely
+
   # Standalone: any Claude Code .jsonl on disk
   jsonl2md.py render path/to/session.jsonl > out.md
   cat session.jsonl | jsonl2md.py render > out.md
@@ -652,7 +735,7 @@ def main():
     )
     sub = ap.add_subparsers(
         dest="cmd",
-        metavar="{list-sessions,export-session,list-chats,export-chat,render,delta,watch,send}",
+        metavar="{list-sessions,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
     )
 
     p_ls = sub.add_parser("list-sessions", help="list titled desktop + VSCode-extension Claude Code sessions")
@@ -740,8 +823,27 @@ def main():
                              "(default); nudge: attach it without blocking")
     p_send.add_argument("--from", dest="sender", default=None,
                         help="optional label for who is sending (shown to the receiving agent)")
+    p_send.add_argument("--reply-to", dest="reply_to", default=None,
+                        help="your OWN cliSessionId, given to the receiver as a return address "
+                             "and echoed back as the await-reply line to arm before you stop")
     p_send.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
     p_send.set_defaults(func=cmd_send)
+
+    p_await = sub.add_parser(
+        "await-reply",
+        help="block until YOUR OWN session's mailbox has a message, then exit (run in background)",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_await.add_argument("title", nargs="?", default=None,
+                         help="YOUR OWN session title or cliSessionId — the mailbox to watch, "
+                              "not the session you messaged")
+    p_await.add_argument("--timeout", type=float, default=3600.0,
+                         help="give up after N seconds and exit anyway (0 = wait forever; "
+                              "default 3600)")
+    p_await.add_argument("--interval", type=float, default=3.0, help="poll seconds (default: 3.0)")
+    p_await.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
+    p_await.set_defaults(func=cmd_await_reply)
 
     args = ap.parse_args()
     if not args.cmd:
