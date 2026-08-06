@@ -89,19 +89,17 @@ if ! printf '%s\n' "$last_text" | grep -qE "$pattern"; then
   exit 0
 fi
 
-# Window: ±1200 chars around the first match, wide enough to carry a table with it.
-window=$(printf '%s' "$last_text" | awk -v pat="$pattern" '
-  { full = full $0 "\n" }
-  END {
-    if (match(full, pat)) {
-      start = RSTART - 1200
-      if (start < 1) start = 1
-      end = RSTART + RLENGTH + 1200
-      if (end > length(full)) end = length(full)
-      print substr(full, start, end - start + 1)
-    }
-  }
-')
+# Window: ±20 lines around the first matching line, wide enough to carry a table with
+# it. Sliced by line rather than by character offset — the pattern carries escaped
+# pipes for table rows, and awk's regex flavour does not take them.
+match_line=$(printf '%s\n' "$last_text" | grep -nE "$pattern" | head -1 | cut -d: -f1)
+if [[ -z "$match_line" ]]; then
+  log_status "window_empty"
+  exit 0
+fi
+start=$(( match_line - 20 ))
+[[ $start -lt 1 ]] && start=1
+window=$(printf '%s\n' "$last_text" | sed -n "${start},$(( match_line + 20 ))p")
 
 api_key_file="$HOME/.claude/anthropic_api_key"
 if [[ ! -f "$api_key_file" ]]; then
