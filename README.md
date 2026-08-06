@@ -5,7 +5,7 @@ folder; one `install.sh` wires them into `~/.claude`.
 
 | Folder | What it is | How it reaches Claude Code |
 | --- | --- | --- |
-| `hooks/` | Bash guardrail hooks (Stop, PreToolUse, PostToolUse) — effort estimates, unexplained hedges, residue, etc. | referenced by absolute path from `~/.claude/settings.json` |
+| `hooks/` | Bash guardrail hooks (Stop, PreToolUse, PostToolUse, UserPromptSubmit, SessionStart) — effort estimates, unexplained hedges, residue, abandoned forks, etc. | referenced by absolute path from `~/.claude/settings.json` |
 | `jsonl2md/` | Session export + `delta`/`watch` tools, and the `/relay` pull command (`commands/`, doc in `SALON.md`) | `jsonl2md.py` is a CLI; `commands/relay.md` is symlinked into `~/.claude/commands/` |
 
 The two mechanisms differ by design: hooks are only discovered via `settings.json`

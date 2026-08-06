@@ -56,6 +56,10 @@ These run before specific tool calls.
 
 - **`note-pick-text.sh`** — catches user prompts carrying step-viewer pick text (the STEP viewer's copy blobs: `file:`/`solid:`/`edge:`/`faceA:`/`faceB:`/`click:` lines, recognized by their three-decimal coordinate triples) and injects `additionalContext` instead of blocking anything. The note points the agent at the format's home (`web/public/js/viewer/pick-format.js`, with verbatim samples in `web/tests/pick-format.test.js`), asks it to echo its decoded identification of each pick before changing geometry, and tells it the part nothing in a pasted blob reveals: the channel is two-way — the viewer's Find box accepts the same format pasted back, opens the `file:` line's file, and highlights every pick, so the agent should emit pick lines when pointing the user at geometry, composed from CadQuery geometry with the viewer repo's `hardware/scripts/pick_text.py` (round-trip tested against the parser). **Fires once per session, not twice**, via `~/.claude/hooks/state/pick-noted-<session-id>` (same 7-day GC). Applies only inside a repo that carries the viewer (found by walking up from cwd); bails silently anywhere else. No Haiku stage and no logging — the coordinate-triple signature is unambiguous, nothing to adjudicate.
 
+### SessionStart hooks
+
+- **`reap-abandoned-forks.sh`** — signals Claude CLI helper forks still running after the turn that spawned them. A fork carries `--fork-session` and `--no-session-persistence`, resumes a session id, and leaves `--tools` and `--setting-sources` empty; a windowed session carries `--replay-user-messages`, `--include-partial-messages` and `--permission-prompt-tool`, and neither fork flag. Both members of a session's process pair — the `disclaimer` wrapper and the `claude` it execs — carry the same argv, so both are taken together. `is_candidate` holds the tests: the fork argv, none of the three window flags, age past `HSM_REAP_MIN_AGE_S` (600 s), cpu under `HSM_REAP_MAX_CPU` (1.0), no children other than its own pair member, and no pid on the hook's own ancestor chain. An ancestor chain shorter than two entries spares every pid. SIGTERM, then SIGKILL to whatever is left. `HSM_REAP_DRY_RUN=1` or `--dry-run` reports and signals nothing. stdout stays empty — a SessionStart hook's stdout is injected as context — and a sweep reports on stderr. A fork runs with `--setting-sources=` empty and loads no user settings, so it never runs this. No Haiku stage: the tests are flags, an age and a pid.
+
 ## How the Stop hooks work
 
 Each Stop hook follows the same shape:
@@ -128,4 +132,5 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 - `hooks/block-unpriced-impossibility.sh` — unpriced-impossibility hook (Stop + SubagentStop, regex + Haiku two-stage)
 - `hooks/note-pick-text.sh` — step-viewer pick-text note (UserPromptSubmit, once-per-session context injection)
 - `hooks/note-inherited-fence.sh` — inherited-fence note (PostToolUse on Task|Agent + UserPromptSubmit on task-notification turns, once-per-session context injection)
-- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all thirteen hooks
+- `hooks/reap-abandoned-forks.sh` — abandoned-fork reaper (SessionStart, argv shape + age + cpu + ancestor chain, no Haiku stage)
+- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all fourteen hooks
