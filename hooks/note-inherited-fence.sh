@@ -91,7 +91,7 @@ fi
 # matching, so a report quoting trigger patterns as code does not fire.
 text=$(printf '%s' "$text" | perl -0pe 's/```.*?```//gs; s/`[^`\n]+`//g' 2>/dev/null || printf '%s' "$text")
 
-# Pre-filter: the same limit-claim shapes block-unpriced-impossibility.sh takes.
+# Pre-filter: limit-claim shapes.
 pattern='(envelope[a-z /-]{0,14}(conversation|bound|problem|question)|needs? the envelope|outside the (current )?envelope|grow (the )?(box|envelope)|[Ii]mpossible|can.?t be done|cannot be done|no room (for|left|anywhere)|there is no room|fully pinned|pinned (on|from) (all|both|every)|exhaust(ed|s)? (the|every|all)|the only (option|place|way|position|route|lane|column|space)|all [a-z0-9-]+ (cross|collide)|every [a-z0-9-]+ (dies|blocked|denied|crosses|collides|fails)|no legal (pose|position|route|path)|nothing (fits|clears)|\bFULL\b)'
 
 if ! printf '%s\n' "$text" | grep -qE "$pattern"; then

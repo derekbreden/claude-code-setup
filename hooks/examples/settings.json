@@ -60,26 +60,11 @@
             "type": "command",
             "command": "$HOME/.claude/hooks/block-unlooked-move.sh",
             "timeout": 6
-          },
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/block-unpriced-impossibility.sh",
-            "timeout": 6
           }
         ]
       }
     ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/block-unpriced-impossibility.sh",
-            "timeout": 6
-          }
-        ]
-      }
-    ],
+    "SubagentStop": [],
     "PostToolUse": [
       {
         "matcher": "Task|Agent",
