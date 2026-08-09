@@ -57,17 +57,23 @@ if [[ -z "$transcript_path" || ! -f "$transcript_path" ]]; then
   exit 0
 fi
 
-last_line=$( (tail -c 200000 "$transcript_path" 2>/dev/null) | (tail -r 2>/dev/null || tac 2>/dev/null) | grep -m 1 '"type":"assistant"' || true)
-if [[ -z "$last_line" ]] || ! printf '%s' "$last_line" | jq -e . >/dev/null 2>&1; then
-  last_line=$( (tail -r "$transcript_path" 2>/dev/null || tac "$transcript_path" 2>/dev/null) | grep -m 1 '"type":"assistant"' || true)
-fi
-if [[ -z "$last_line" ]]; then
+# The turn's final text, waited for. Reading it is not the one-liner it looks
+# like: the last assistant LINE at a turn's end is routinely `thinking` or
+# `tool_use` and holds no text, and the record this hook was fired to judge is
+# still being written while the hook runs. _last_assistant_text.py carries both,
+# and its docstring carries the measurement.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+set +e
+last_text=$(python3 "$HOOK_DIR/_last_assistant_text.py" "$transcript_path")
+read_rc=$?
+set -e
+if [[ $read_rc -eq 1 ]]; then
   log_status "no_assistant_message"
   exit 0
 fi
+[[ $read_rc -eq 2 ]] && log_status "stale_read"
 
-last_text=$(printf '%s' "$last_line" | jq -r '(.message.content // []) | map(select(.type == "text") | .text) | join("\n")' 2>/dev/null || true)
-if [[ -z "$last_text" || ${#last_text} -lt 40 ]]; then
+if [[ ${#last_text} -lt 40 ]]; then
   log_status "empty_or_short_text" "$(jq -nc --argjson len "${#last_text}" '{text_len: $len}')"
   exit 0
 fi
@@ -89,17 +95,30 @@ if ! printf '%s\n' "$last_text" | grep -qE "$pattern"; then
   exit 0
 fi
 
+# A match is logged here, before the stages that can fail. Everything past this
+# point can die — the API call times out, a stage exits non-zero under `set -e`,
+# the hook's own timeout kills the process — and none of it writes a line. A
+# `regex_match` with no verdict after it is that death; without this line the
+# death and a clean miss are the same silence.
+matched_span=$(printf '%s\n' "$last_text" | grep -oE "$pattern" | head -1 || true)
+log_status "regex_match" "$(jq -nc --arg span "$matched_span" '{matched: $span}')"
+
 # Window: ±20 lines around the first matching line, wide enough to carry a table with
 # it. Sliced by line rather than by character offset — the pattern carries escaped
 # pipes for table rows, and awk's regex flavour does not take them.
-match_line=$(printf '%s\n' "$last_text" | grep -nE "$pattern" | head -1 | cut -d: -f1)
+match_line=$(printf '%s\n' "$last_text" | grep -nE "$pattern" | head -1 | cut -d: -f1 || true)
 if [[ -z "$match_line" ]]; then
   log_status "window_empty"
   exit 0
 fi
 start=$(( match_line - 20 ))
 [[ $start -lt 1 ]] && start=1
-window=$(printf '%s\n' "$last_text" | sed -n "${start},$(( match_line + 20 ))p")
+window=$(printf '%s\n' "$last_text" | sed -n "${start},$(( match_line + 20 ))p" || true)
+
+if [[ -z "$window" ]]; then
+  log_status "window_empty" "$(jq -nc --arg span "$matched_span" '{matched: $span}')"
+  exit 0
+fi
 
 api_key_file="$HOME/.claude/anthropic_api_key"
 if [[ ! -f "$api_key_file" ]]; then
@@ -135,11 +154,17 @@ response=$(curl -sS https://api.anthropic.com/v1/messages \
   --max-time 3 \
   -d "$body" 2>/dev/null || echo '{}')
 
-classification=$(printf '%s' "$response" | jq -r '.content[0].text // empty' | tr -d '[:space:].' | tr '[:upper:]' '[:lower:]')
+# The verdict is the reply's FIRST WORD. `max_tokens` is 5 and Haiku spends them
+# opening a sentence as often as answering bare, so the reply arrives as either
+# "sweep" or "sweep. The table". Reading the first alphabetic run takes the
+# verdict out of both shapes and keeps the logged value legible, which a prefix
+# test on the whole run-on string does not. The budget stays at 5: latency here
+# is what kills invocations.
+classification=$(printf '%s' "$response" | jq -r '.content[0].text // empty' | tr '[:upper:]' '[:lower:]' | grep -oE '[a-z]+' | head -1 || true)
 
 if [[ -z "$classification" ]]; then
   log_status "haiku_no_response"
-elif [[ "$classification" == sweep* ]]; then
+elif [[ "$classification" == "sweep" ]]; then
   log_status "blocked" "$(jq -nc --arg classification "$classification" '{classification: $classification}')"
   jq -n '{
     "decision": "block",

@@ -24,6 +24,8 @@ You will *not* get value from this if:
 
 These run after each assistant turn. The first three are regex + Haiku two-stage; the fourth reads an ordering out of the transcript and has no Haiku stage. Each one runs a cheap regex pre-filter against the last assistant message; if it matches, a windowed snippet goes to Claude Haiku for disambiguation; if Haiku confirms the targeted pattern, the turn is blocked with a `reason` returned to the assistant.
 
+The message they judge comes from **`_last_assistant_text.py`**, and getting it is not the one-liner it looks like. A turn's closing transcript lines are routinely `thinking` and `tool_use` records — assistant lines holding no text — so the last assistant *line* yields an empty message. And the hook fires while the record it was fired for is still being written, so the newest text on disk belongs to the previous turn. The reader takes the last assistant record that actually carries text, and waits (bounded at 2 s, ending the moment fresh text lands) for one younger than 5 s. A read that never goes fresh is judged anyway and logged `stale_read`, since a turn whose last text predates a long tool run is a legitimate shape.
+
 - **`block-effort-estimate.sh`** — catches phrasings like "this'll take a day", "maybe a few hours", "weeks not months", "a couple of weeks". An effort estimate from an LLM is not tied to reality: it is pattern-matched from training data, where humans wrote estimates of work they were doing — work the LLM will do entirely differently. The block message asks the assistant to rewrite without one.
 
 - **`block-unexplained-hedge.sh`** — catches "I'm not sure", "I might be wrong", "this could be off" when the assistant doesn't name the underlying concern. The block message asks the assistant to explain the concern rather than remove the hedge. Substantive hedges (where the concern is named) pass through; social/habitual hedges get blocked.
@@ -86,8 +88,12 @@ The regex + Haiku Stop hooks, `block-unlooked-move.sh`, `block-residue.sh`, `blo
 - `haiku_no_response` — Haiku call made but empty response (timeout, network failure, etc.)
 
 - `no_render_repo` / `no_placement_edits` / `looked` — outside a repo with the renderer, no placement or routing edit in this session, or the last look is newer than the source (`block-unlooked-move.sh`; the `looked` and `blocked` lines carry `edits`, `looks`, `last_look`, `src_mtime` and `step_mtime`, so a firing can be read back against which write beat the look)
+- `stale_read` — the reader's wait expired and the message judged is the newest text on disk, which may predate this turn; the run continues and logs its verdict as usual
+- `regex_match` — the pre-filter matched, logged **before** the window, the API call and the verdict. A `regex_match` with no verdict line after it is an invocation that died — timeout, or a stage exiting non-zero — and without it a death and a clean miss are the same silence
 - `allowed` — Haiku classified as the look-alike; no block emitted
 - `blocked` — Haiku classified as the targeted pattern; block was emitted
+
+The verdict is read as the **first word** of Haiku's reply. With `max_tokens: 5` it answers bare (`effort`) about as often as it opens a sentence (`effort. The flagged phrase`), and a whole-string compare reads the second shape as a word matching no case — which falls through to allowed.
 
 The `regex_no_match` lines are the diagnostic surface for tuning. If a pattern slips through in normal use, grep the log:
 
@@ -118,6 +124,7 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 
 ## Files
 
+- `hooks/_last_assistant_text.py` — the turn's final text, waited for (shared by the four two-stage Stop hooks)
 - `hooks/block-effort-estimate.sh` — effort-estimate hook (Stop, regex + Haiku two-stage)
 - `hooks/block-unexplained-hedge.sh` — hedge hook (Stop, regex + Haiku two-stage)
 - `hooks/block-question-as-disagreement.sh` — question-as-disagreement hook (Stop, regex + Haiku two-stage)
