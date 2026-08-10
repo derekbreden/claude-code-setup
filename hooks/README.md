@@ -1,6 +1,6 @@
 # claude-code-hooks
 
-Claude Code hooks. Five Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question, reporting on an enclosure body that was moved and not looked at, and impossibility claims that carry no price — the fifth also wired on SubagentStop, so a subagent's final report meets it before a manager reads it. Three PreToolUse hooks block specific writes: project memory files, content containing residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). A fourth PreToolUse hook runs on `Bash` and blocks branch creation, so work stays on `main` in the one shared worktree; a fifth, also on `Bash`, nudges once per session against flashing firmware with a dirty tree, so flashed binaries map to commits by default. A sixth runs on `WebFetch` and `WebSearch` and denies the first call of each (per tool, per session) with a redirect to Chrome MCP, which is far more reliable. Two hooks inject context instead of blocking: when a prompt carries step-viewer pick text, one points the agent (once per session) at the format's home and at the fact the channel is two-way; when a subagent report or task notification arrives carrying a limit claim, the other names it (once per session) as an inherited fence to probe before relaying.
+Claude Code hooks. Four Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question, and impossibility claims that carry no price — the fourth also wired on SubagentStop, so a subagent's final report meets it before a manager reads it. Three PreToolUse hooks block specific writes: project memory files, content containing residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). A fourth PreToolUse hook runs on `Bash` and blocks branch creation, so work stays on `main` in the one shared worktree; a fifth, also on `Bash`, nudges once per session against flashing firmware with a dirty tree, so flashed binaries map to commits by default. A sixth runs on `WebFetch` and `WebSearch` and denies the first call of each (per tool, per session) with a redirect to Chrome MCP, which is far more reliable. Two hooks inject context instead of blocking: when a prompt carries step-viewer pick text, one points the agent (once per session) at the format's home and at the fact the channel is two-way; when a subagent report or task notification arrives carrying a limit claim, the other names it (once per session) as an inherited fence to probe before relaying.
 
 This is a personal tool, put on GitHub in case it helps someone running similar configurations. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
 
@@ -22,7 +22,7 @@ You will *not* get value from this if:
 
 ### Stop hooks
 
-These run after each assistant turn. The first three are regex + Haiku two-stage; the fourth reads an ordering out of the transcript and has no Haiku stage. Each one runs a cheap regex pre-filter against the last assistant message; if it matches, a windowed snippet goes to Claude Haiku for disambiguation; if Haiku confirms the targeted pattern, the turn is blocked with a `reason` returned to the assistant.
+These run after each assistant turn. Each one runs a cheap regex pre-filter against the last assistant message; if it matches, a windowed snippet goes to Claude Haiku for disambiguation; if Haiku confirms the targeted pattern, the turn is blocked with a `reason` returned to the assistant.
 
 The message they judge comes from **`_last_assistant_text.py`**, and getting it is not the one-liner it looks like. A turn's closing transcript lines are routinely `thinking` and `tool_use` records — assistant lines holding no text — so the last assistant *line* yields an empty message. And the hook fires while the record it was fired for is still being written, so the newest text on disk belongs to the previous turn. The reader takes the last assistant record that actually carries text, and waits (bounded at 2 s, ending the moment fresh text lands) for one younger than 5 s. A read that never goes fresh is judged anyway and logged `stale_read`, since a turn whose last text predates a long tool run is a legitimate shape.
 
@@ -31,9 +31,6 @@ The message they judge comes from **`_last_assistant_text.py`**, and getting it 
 - **`block-unexplained-hedge.sh`** — catches "I'm not sure", "I might be wrong", "this could be off" when the assistant doesn't name the underlying concern. The block message asks the assistant to explain the concern rather than remove the hedge. Substantive hedges (where the concern is named) pass through; social/habitual hedges get blocked.
 
 - **`block-question-as-disagreement.sh`** — catches "I notice X — was that intended?" / "Did you mean to Y?" / "Is that on purpose?" when the assistant frames a structural disagreement as a question. The block message asks the assistant to state the disagreement directly. Genuine information-gathering questions pass through; disagreement framed as a question gets blocked.
-
-
-- **`block-unlooked-move.sh`** — in a turn that edited the enclosure's placement (`_contents.py`) or routing (`_lines.py`), fires when the last look is older than those files' newest mtime anywhere in the repo. A look is a `render-view.js` or `look.sh` run, or a `Read` of a `.png`. The mtime is the authority and the transcript carries only this session, so a look taken before **any** agent's edit reads as stale — several sessions share one working tree, and a body moves under a render already taken. A session that edited neither file passes, so another agent's edit alone never fires it. No Haiku stage: the markers are a file path, a tool name and a timestamp. **Fires once per session, not twice** — the message hands over the `tools/look.sh <body>` invocation, the elevations the assembly builds beside its STEP, `calibration/Fences.md`, and the build command when the exported `.step` predates the edit (the renderer reads that `.step`, so a look before a build carries the previous geometry). Marker at `~/.claude/hooks/state/unlooked-warned-<session-id>`, same 7-day GC. Scoped to a repo carrying `tools/render/render-view.js`; silent elsewhere. 0.4 s against a 64 MB transcript.
 
 ### PreToolUse hooks
 
@@ -76,18 +73,16 @@ The two-stage design keeps API cost down (most turns never reach Haiku) while ke
 
 ## Logging
 
-The regex + Haiku Stop hooks, `block-unlooked-move.sh`, `block-residue.sh`, `block-underived-measurement.sh`, and `note-inherited-fence.sh` each append one JSONL line per event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
+The regex + Haiku Stop hooks, `block-residue.sh`, `block-underived-measurement.sh`, and `note-inherited-fence.sh` each append one JSONL line per event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
 
 - `loop_guard` — re-entry from a revision attempt, skipped (Stop hooks only)
 - `no_transcript` / `no_assistant_message` / `empty_or_short_text` / `empty_after_strip` — nothing to check (Stop hooks)
 - `wrong_tool` / `skipped_calibration` / `skipped_non_prose` / `empty_or_short` / `no_calibration_files` — file or tool filtered out (`block-residue.sh` only)
 - `skipped_filetype` / `no_docgen_repo` / `empty_after_strip` — file filtered out: not `.md`/`.py`/`.scad`, not inside a `tools/docgen` repo, or no prose left after stripping comments and markers (`block-underived-measurement.sh` only)
-- `already_warned_this_session` — session marker exists from a prior nudge in the same session; hook passes through (`block-residue.sh`, `block-underived-measurement.sh` and `block-unlooked-move.sh`)
+- `already_warned_this_session` — session marker exists from a prior nudge in the same session; hook passes through (`block-residue.sh` and `block-underived-measurement.sh`)
 - `regex_no_match` — pre-filter didn't match; **Stop-hook log lines include `last_400_chars` of the response so you can see what slipped through**
 - `no_api_key` — `~/.claude/anthropic_api_key` is missing
 - `haiku_no_response` — Haiku call made but empty response (timeout, network failure, etc.)
-
-- `no_render_repo` / `no_placement_edits` / `looked` — outside a repo with the renderer, no placement or routing edit in this session, or the last look is newer than the source (`block-unlooked-move.sh`; the `looked` and `blocked` lines carry `edits`, `looks`, `last_look`, `src_mtime` and `step_mtime`, so a firing can be read back against which write beat the look)
 - `stale_read` — the reader's wait expired and the message judged is the newest text on disk, which may predate this turn; the run continues and logs its verdict as usual
 - `regex_match` — the pre-filter matched, logged **before** the window, the API call and the verdict. A `regex_match` with no verdict line after it is an invocation that died — timeout, or a stage exiting non-zero — and without it a death and a clean miss are the same silence
 - `allowed` — Haiku classified as the look-alike; no block emitted
@@ -134,8 +129,7 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 - `hooks/block-branch.sh` — branch-creation hook (PreToolUse on Bash, command-pattern match)
 - `hooks/block-flash-before-commit.sh` — flash-guard hook (PreToolUse on Bash, command-pattern match + `git status --porcelain` dirty check)
 - `hooks/block-web.sh` — web-tool-redirect hook (PreToolUse on WebFetch|WebSearch, once-per-session-per-tool nudge to Chrome MCP)
-- `hooks/block-unlooked-move.sh` — unlooked-move hook (Stop, transcript ordering, no Haiku stage)
 - `hooks/note-pick-text.sh` — step-viewer pick-text note (UserPromptSubmit, once-per-session context injection)
 - `hooks/note-inherited-fence.sh` — inherited-fence note (PostToolUse on Task|Agent + UserPromptSubmit on task-notification turns, once-per-session context injection)
 - `hooks/reap-abandoned-forks.sh` — abandoned-fork reaper (SessionStart, argv shape + age + cpu + ancestor chain, no Haiku stage)
-- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all fourteen hooks
+- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all thirteen hooks

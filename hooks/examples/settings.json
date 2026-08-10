@@ -55,11 +55,6 @@
           {
             "type": "command",
             "command": "$HOME/.claude/hooks/block-question-as-disagreement.sh"
-          },
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/block-unlooked-move.sh",
-            "timeout": 6
           }
         ]
       }
