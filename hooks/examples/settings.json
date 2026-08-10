@@ -55,11 +55,26 @@
           {
             "type": "command",
             "command": "$HOME/.claude/hooks/block-question-as-disagreement.sh"
+          },
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/block-parameter-sweep.sh",
+            "timeout": 6
           }
         ]
       }
     ],
-    "SubagentStop": [],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/block-parameter-sweep.sh",
+            "timeout": 6
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Task|Agent",

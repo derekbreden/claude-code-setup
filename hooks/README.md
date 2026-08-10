@@ -1,6 +1,6 @@
 # claude-code-hooks
 
-Claude Code hooks. Four Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question, and impossibility claims that carry no price — the fourth also wired on SubagentStop, so a subagent's final report meets it before a manager reads it. Three PreToolUse hooks block specific writes: project memory files, content containing residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). A fourth PreToolUse hook runs on `Bash` and blocks branch creation, so work stays on `main` in the one shared worktree; a fifth, also on `Bash`, nudges once per session against flashing firmware with a dirty tree, so flashed binaries map to commits by default. A sixth runs on `WebFetch` and `WebSearch` and denies the first call of each (per tool, per session) with a redirect to Chrome MCP, which is far more reliable. Two hooks inject context instead of blocking: when a prompt carries step-viewer pick text, one points the agent (once per session) at the format's home and at the fact the channel is two-way; when a subagent report or task notification arrives carrying a limit claim, the other names it (once per session) as an inherited fence to probe before relaying.
+Claude Code hooks. Four Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question, and parameter sweeps reported as a finding — the fourth also wired on SubagentStop, so a subagent's final report meets it before a manager reads it. Three PreToolUse hooks block specific writes: project memory files, content containing residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). A fourth PreToolUse hook runs on `Bash` and blocks branch creation, so work stays on `main` in the one shared worktree; a fifth, also on `Bash`, nudges once per session against flashing firmware with a dirty tree, so flashed binaries map to commits by default. A sixth runs on `WebFetch` and `WebSearch` and denies the first call of each (per tool, per session) with a redirect to Chrome MCP, which is far more reliable. Two hooks inject context instead of blocking: when a prompt carries step-viewer pick text, one points the agent (once per session) at the format's home and at the fact the channel is two-way; when a subagent report or task notification arrives carrying a limit claim, the other names it (once per session) as an inherited fence to probe before relaying.
 
 This is a personal tool, put on GitHub in case it helps someone running similar configurations. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
 
@@ -31,6 +31,8 @@ The message they judge comes from **`_last_assistant_text.py`**, and getting it 
 - **`block-unexplained-hedge.sh`** — catches "I'm not sure", "I might be wrong", "this could be off" when the assistant doesn't name the underlying concern. The block message asks the assistant to explain the concern rather than remove the hedge. Substantive hedges (where the concern is named) pass through; social/habitual hedges get blocked.
 
 - **`block-question-as-disagreement.sh`** — catches "I notice X — was that intended?" / "Did you mean to Y?" / "Is that on purpose?" when the assistant frames a structural disagreement as a question. The block message asks the assistant to state the disagreement directly. Genuine information-gathering questions pass through; disagreement framed as a question gets blocked.
+
+- **`block-parameter-sweep.sh`** — catches a parameter sweep reported as a finding: one input (a position, an offset, a travel, an angle) varied across several values, an outcome beside each, and a limit, a trade-off or a question back to the user read off the trend. Every row of such a table is a half-move — one body travelled and everything deriving from it left standing — so the trend prices mutilating the machine rather than the move. The pre-filter carries the sweep verbs, the per-millimetre phrasings and a bare `| 12.5 mm | 3.1 |` table row; Haiku separates a sweep from a **solve** (a threshold inverted from the constraint), a **probe** (one configuration measured), a current-vs-target comparison, or a search through source. Inline code spans are stripped and **fenced blocks and tables are kept**. The window is **±20 lines** around the first matching line, sliced by line. The block message asks for the target stated as the condition it has to meet, the derivation chain printed, all of it moved in one commit and the gates left to price the whole rearrangement; and where a link has no derivable answer, that link sent instead of the table. Wired on **Stop and SubagentStop**, so a stint's final report meets it before a manager reads it. Fires only when the Chain calibration exists at `~/Developer/homesodamachine/calibration/Chain.md`; bails silently anywhere else.
 
 ### PreToolUse hooks
 
@@ -65,8 +67,8 @@ Each Stop hook follows the same shape:
 1. Read the assistant's last turn from the session transcript JSONL.
 2. Strip backtick-delimited spans (so docs that quote the hook's own trigger patterns don't fire the hook on itself).
 3. Run a **cheap regex pre-filter** against the last turn. If nothing matches, exit silently.
-4. If the regex matches, extract a **±800-char window** of context around the match.
-5. Send the window to **Claude Haiku 4.5** with a classification prompt that distinguishes the targeted pattern from the look-alike (effort vs projection; substantive vs social hedge; genuine question vs disagreement-framed-as-question).
+4. If the regex matches, extract a window of context around the match — **±800 chars**, and **±20 lines** in `block-parameter-sweep.sh`.
+5. Send the window to **Claude Haiku 4.5** with a classification prompt that distinguishes the targeted pattern from the look-alike (effort vs projection; substantive vs social hedge; genuine question vs disagreement-framed-as-question; sweep vs solve, probe or comparison).
 6. If Haiku classifies as the targeted pattern, emit a `block` decision with a `reason`.
 
 The two-stage design keeps API cost down (most turns never reach Haiku) while keeping the catch precise (Haiku sees real context, not just the matched fragment).
@@ -123,6 +125,7 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 - `hooks/block-effort-estimate.sh` — effort-estimate hook (Stop, regex + Haiku two-stage)
 - `hooks/block-unexplained-hedge.sh` — hedge hook (Stop, regex + Haiku two-stage)
 - `hooks/block-question-as-disagreement.sh` — question-as-disagreement hook (Stop, regex + Haiku two-stage)
+- `hooks/block-parameter-sweep.sh` — parameter-sweep hook (Stop + SubagentStop, regex + Haiku two-stage)
 - `hooks/block-memory-write.sh` — memory-write hook (PreToolUse, path comparison only)
 - `hooks/block-residue.sh` — residue hook (PreToolUse, regex + Haiku two-stage)
 - `hooks/block-underived-measurement.sh` — underived-measurement hook (PreToolUse, regex + Haiku two-stage)
@@ -132,4 +135,4 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 - `hooks/note-pick-text.sh` — step-viewer pick-text note (UserPromptSubmit, once-per-session context injection)
 - `hooks/note-inherited-fence.sh` — inherited-fence note (PostToolUse on Task|Agent + UserPromptSubmit on task-notification turns, once-per-session context injection)
 - `hooks/reap-abandoned-forks.sh` — abandoned-fork reaper (SessionStart, argv shape + age + cpu + ancestor chain, no Haiku stage)
-- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all thirteen hooks
+- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all fifteen hooks
