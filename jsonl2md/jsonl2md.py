@@ -288,6 +288,36 @@ def vscode_session_names():
     return open_titles, cached_labels
 
 
+def peer_addresses():
+    """`{sessionId: {"name", "socket", "pid"}}` for every session listening on the
+    NATIVE peer channel right now.
+
+    `~/.claude/sessions/<pid>.json` is Claude Code's own registry and it carries the
+    same `sessionId` this tool addresses sessions by, so it is the join between the
+    two namespaces: the relay knows a session as a title and a uuid, `SendMessage`
+    knows it as `name`, and this is where those meet.
+
+    A session is reachable when it has registered a `messagingSocketPath`, that
+    socket is still on disk, and its process is still alive. A registry entry
+    without one is a session running an older build or launched without the peer
+    channel — the file relay is the only way in, and `ListAgents` will not show it."""
+    out = {}
+    for p in glob.glob(f"{SESSIONS_ROOT}/*.json"):
+        try:
+            m = json.load(open(p))
+        except Exception:
+            continue
+        sid, sock, pid = m.get("sessionId"), m.get("messagingSocketPath"), m.get("pid")
+        if not (sid and sock and os.path.exists(sock)):
+            continue
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            continue                      # registry outlived the process
+        out[sid] = {"name": m.get("name") or sid[:8], "socket": sock, "pid": pid}
+    return out
+
+
 def list_vscode_sessions(target_cwd):
     """VSCode-extension sessions for target_cwd, titled by the name YOU gave them
     in VSCode so they're addressable interchangeably (e.g. `relay Garbage`).
@@ -423,8 +453,15 @@ def chat_to_records(chat):
 
 
 def cmd_list_sessions(args):
-    for s in list_sessions(args.cwd):
-        print(s["title"])
+    peers = peer_addresses()
+    rows = list_sessions(args.cwd)
+    width = max((len(s["title"]) for s in rows), default=0)
+    for s in rows:
+        peer = peers.get(s["cliSessionId"])
+        if peer:
+            print(f'{s["title"]:<{width}}  → SendMessage to: {peer["name"]}')
+        else:
+            print(f'{s["title"]:<{width}}  → relay only (no peer channel)')
 
 
 def cmd_list_chats(args):
@@ -663,6 +700,21 @@ def cmd_await_reply(args):
 
 def cmd_send(args):
     cli_id, label = resolve_target(args.title, args.cwd)
+    peer = peer_addresses().get(cli_id)
+    if peer and not args.force_relay:
+        sys.stderr.write(
+            f"[relay] {label} IS ON THE NATIVE PEER CHANNEL. Use that instead:\n"
+            f"[relay]\n"
+            f"[relay]     SendMessage(to: \"{peer['name']}\", message: \"...\")\n"
+            f"[relay]\n"
+            f"[relay] It reaches a working session in-band instead of waiting on its next\n"
+            f"[relay] tool call, and the reply comes back to you the same way — no mailbox,\n"
+            f"[relay] no await-reply, nothing to arm before you stop.\n"
+            f"[relay]\n"
+            f"[relay] `ListAgents` lists it as `{peer['name']}`. Nothing was sent.\n"
+            f"[relay] If you meant the file mailbox anyway, re-run with --force-relay.\n"
+        )
+        return 1
     box = os.path.join(RELAY_INBOX_ROOT, cli_id)
     os.makedirs(box, exist_ok=True)
     msg = {"mode": args.mode, "text": args.text, "from": args.sender, "ts": time.time()}
@@ -711,13 +763,27 @@ examples:
   jsonl2md.py delta "PCB clean" --tail 2   # just the last 2 exchanges
   jsonl2md.py watch "PCB clean"            # stream new turns live as they land
 
-  # Interject into another live session (delivered on its next tool call)
-  jsonl2md.py send "Autorouter" "stop and reconsider whether fix 1 is still needed"
-  jsonl2md.py send "Autorouter" "looks good, keep going" --mode nudge
+  # Interject into another live session. FIRST CHECK HOW TO REACH IT — list-sessions
+  # prints the address beside every title:
+  #
+  #   Condenser           → SendMessage to: Condenser
+  #   Build time          → relay only (no peer channel)
+  #
+  # A session with a peer channel takes SendMessage(to: "<name>", message: "..."),
+  # which lands in-band and answers back the same way. `send` refuses those and
+  # prints the call to use, because the mailbox below is the slower path: it waits
+  # on the target's next tool call and cannot carry a reply on its own.
+  #
+  # The mailbox is for the rest — sessions on an older build, or launched without
+  # the peer channel, which `ListAgents` cannot see at all.
+  jsonl2md.py send "Build time" "stop and reconsider whether fix 1 is still needed"
+  jsonl2md.py send "Build time" "looks good, keep going" --mode nudge
+  jsonl2md.py send "Condenser" "..." --force-relay   # mailbox anyway, on purpose
 
   # ...and hear back. Nothing wakes an idle session, so if you asked a question,
   # arm the watcher IN THE BACKGROUND before you stop. Its exit is the wake-up.
-  jsonl2md.py send "Autorouter" "revert it?" --reply-to 5c12fda9-5e77-4a1e-894a-5f91d06cf0e4
+  # (SendMessage needs none of this — the reply comes back to you in-band.)
+  jsonl2md.py send "Build time" "revert it?" --reply-to 5c12fda9-5e77-4a1e-894a-5f91d06cf0e4
   jsonl2md.py await-reply 5c12fda9-5e77-4a1e-894a-5f91d06cf0e4 --timeout 3600
   jsonl2md.py await-reply "My Session Title" --timeout 0     # wait indefinitely
 
@@ -826,6 +892,9 @@ def main():
     p_send.add_argument("--reply-to", dest="reply_to", default=None,
                         help="your OWN cliSessionId, given to the receiver as a return address "
                              "and echoed back as the await-reply line to arm before you stop")
+    p_send.add_argument("--force-relay", action="store_true",
+                        help="use the file mailbox even when the target is on the native peer "
+                             "channel (default: refuse, and print the SendMessage call to use)")
     p_send.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
     p_send.set_defaults(func=cmd_send)
 
@@ -848,9 +917,9 @@ def main():
     args = ap.parse_args()
     if not args.cmd:
         ap.print_help()
-        return
-    args.func(args)
+        return 0
+    return args.func(args) or 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
