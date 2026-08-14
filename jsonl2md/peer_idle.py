@@ -193,6 +193,12 @@ def main() -> int:
         default="any",
         help="wake on the first session to stop (any), or once every one has (all)",
     )
+    ap.add_argument(
+        "--since-now",
+        action="store_true",
+        help="only wake on sessions that stop after this call; use it when re-arming, "
+        "so the ones you were just told about do not fire again",
+    )
     ap.add_argument("--interval", type=float, default=5.0, help="poll seconds")
     ap.add_argument(
         "--timeout",
@@ -210,10 +216,14 @@ def main() -> int:
         return 0
 
     started = time.time()
-    # A session already stopped when the watch begins has not been reported to anyone,
-    # so it counts -- waiting for a fresh transition would hide exactly the case that
-    # matters, a worker that stopped while the coordinator was busy elsewhere.
+    # A session already stopped when the watch begins counts, because it has not been
+    # reported to anyone -- waiting for a fresh transition would hide exactly the case
+    # that matters, a worker that stopped while the coordinator was busy elsewhere.
+    # `--since-now` seeds those as already-known instead, which is what a re-arm wants:
+    # the stops it was just woken for are the ones it must not be woken for again.
     prior: dict[str, str] = {}
+    if args.since_now:
+        prior = {n: r["state"] for n, r in snapshot(cwd, ignore).items()}
     while True:
         rows = snapshot(cwd, ignore)
 
