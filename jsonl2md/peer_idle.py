@@ -15,6 +15,11 @@ an assistant message still in flight. It is IDLE the moment its last record is a
 assistant message whose `stop_reason` is `end_turn` -- that is the turn ending. A session
 whose process is gone is GONE, which is the same ball dropped by a different route.
 
+Most stops are not dropped balls. A session parked on a background build ends its turn
+too, and the harness wakes it when the build lands. What separates the two is only how
+long the stop lasts, so `--dwell` holds a stop until it has persisted that long. A dead
+process needs no dwell: nothing is coming to wake it.
+
 Run the watching forms with run_in_background so the exit is the notification.
 """
 
@@ -160,6 +165,17 @@ def snapshot(cwd: str, ignore: set[str]) -> dict[str, dict]:
     return rows
 
 
+def settled(row: dict, dwell: float) -> bool:
+    """Whether a stop has lasted long enough to mean anything.
+
+    A dead process is settled at once -- no notification is coming to revive it. A live
+    session that ended its turn may be parked on a background task, so it only counts
+    once the stop has outlasted the dwell."""
+    if row["state"] == GONE:
+        return True
+    return row["state"] == IDLE and row["idle_for"] >= dwell
+
+
 def fmt(row: dict, width: int) -> str:
     mark = {WORKING: "·", IDLE: "STOPPED", GONE: "GONE", UNKNOWN: "?"}[row["state"]]
     age = f"{row['idle_for']:6.0f}s" if row["state"] != WORKING else "       "
@@ -199,6 +215,14 @@ def main() -> int:
         help="only wake on sessions that stop after this call; use it when re-arming, "
         "so the ones you were just told about do not fire again",
     )
+    ap.add_argument(
+        "--dwell",
+        type=float,
+        default=0.0,
+        help="seconds a session must stay stopped before it counts, so a park on a "
+        "background build is not mistaken for an abandoned one (a dead process is "
+        "reported regardless)",
+    )
     ap.add_argument("--interval", type=float, default=5.0, help="poll seconds")
     ap.add_argument(
         "--timeout",
@@ -221,15 +245,18 @@ def main() -> int:
     # that matters, a worker that stopped while the coordinator was busy elsewhere.
     # `--since-now` seeds those as already-known instead, which is what a re-arm wants:
     # the stops it was just woken for are the ones it must not be woken for again.
-    prior: dict[str, str] = {}
+    prior: dict[str, bool] = {}
     if args.since_now:
-        prior = {n: r["state"] for n, r in snapshot(cwd, ignore).items()}
+        prior = {
+            n: settled(r, args.dwell)
+            for n, r in snapshot(cwd, ignore).items()
+        }
     while True:
         rows = snapshot(cwd, ignore)
 
         if args.quorum == "all":
             live = [r for r in rows.values() if r["state"] in (WORKING, IDLE)]
-            if live and all(r["state"] == IDLE for r in live):
+            if live and all(settled(r, args.dwell) for r in live):
                 print(f"ALL STOPPED — {len(live)} session(s), none working")
                 report(rows)
                 return 0
@@ -237,7 +264,7 @@ def main() -> int:
             stopped = [
                 r
                 for n, r in rows.items()
-                if r["state"] in (IDLE, GONE) and prior.get(n) not in (IDLE, GONE)
+                if settled(r, args.dwell) and not prior.get(n, False)
             ]
             if stopped:
                 for row in stopped:
@@ -249,7 +276,7 @@ def main() -> int:
                 report(rows)
                 return 0
 
-        prior = {n: r["state"] for n, r in rows.items()}
+        prior = {n: settled(r, args.dwell) for n, r in rows.items()}
         if args.timeout and (time.time() - started) > args.timeout:
             print(f"timeout after {args.timeout:.0f}s — nobody stopped")
             report(rows)
