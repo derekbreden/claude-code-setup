@@ -11,9 +11,11 @@ background wake-up rather than something to poll.
     peer_idle.py --quorum all            # block until everyone has stopped
 
 A session is WORKING while its last transcript record is a tool call, a tool result, or
-an assistant message still in flight. It is IDLE the moment its last record is an
-assistant message whose `stop_reason` is `end_turn` -- that is the turn ending. A session
-whose process is gone is GONE, which is the same ball dropped by a different route.
+an assistant message still in flight -- `stop_reason` of `tool_use` is the only value
+that promises another record. Any other terminal reason ends the turn, so the session is
+IDLE. A turn that ended on a transport error is FAILED, which is the same stop wearing
+the costume of a finished one and the most expensive to miss: the work is mid-flight and
+nothing retries it. A session whose process is gone is GONE.
 
 Most stops are not dropped balls. A session parked on a background build ends its turn
 too, and the harness wakes it when the build lands. What separates the two is only how
@@ -39,6 +41,12 @@ PROJECTS = pathlib.Path.home() / ".claude" / "projects"
 TAIL_BYTES = 262_144
 
 WORKING, IDLE, GONE, UNKNOWN = "working", "idle", "gone", "unknown"
+FAILED = "failed"
+
+# The one stop_reason that means another record is coming. Every other terminal value --
+# `end_turn`, `stop_sequence`, `max_tokens` -- means the assistant will not act again
+# without being spoken to, whether it finished or fell over.
+CONTINUES = "tool_use"
 
 
 def project_dir(cwd: str) -> pathlib.Path:
@@ -137,14 +145,22 @@ def state_of(sess: dict, cwd: str) -> dict:
         return row
 
     last = turns[-1]
+    reason = last.get("message", {}).get("stop_reason")
     ended = (
         last.get("type") == "assistant"
-        and last.get("message", {}).get("stop_reason") == "end_turn"
+        and reason is not None
+        and reason != CONTINUES
     )
     if not sess["alive"]:
         row["state"] = GONE
+    elif ended:
+        # A turn that died on a transport error looks exactly like one that finished,
+        # and is the worse of the two: the work is mid-flight and nothing will retry it.
+        # Naming it apart is the whole point -- a stop reported as completion gets read
+        # as completion.
+        row["state"] = FAILED if "API Error" in last_text(last) else IDLE
     else:
-        row["state"] = IDLE if ended else WORKING
+        row["state"] = WORKING
     for rec in reversed(turns):
         text = last_text(rec)
         if text:
@@ -171,13 +187,19 @@ def settled(row: dict, dwell: float) -> bool:
     A dead process is settled at once -- no notification is coming to revive it. A live
     session that ended its turn may be parked on a background task, so it only counts
     once the stop has outlasted the dwell."""
-    if row["state"] == GONE:
+    if row["state"] in (GONE, FAILED):
         return True
     return row["state"] == IDLE and row["idle_for"] >= dwell
 
 
 def fmt(row: dict, width: int) -> str:
-    mark = {WORKING: "·", IDLE: "STOPPED", GONE: "GONE", UNKNOWN: "?"}[row["state"]]
+    mark = {
+        WORKING: "·",
+        IDLE: "STOPPED",
+        FAILED: "FAILED",
+        GONE: "GONE",
+        UNKNOWN: "?",
+    }[row["state"]]
     age = f"{row['idle_for']:6.0f}s" if row["state"] != WORKING else "       "
     return f"  {row['name']:<{width}}  {mark:<8} {age}  {row['tail'][:96]}"
 
@@ -187,7 +209,8 @@ def report(rows: dict[str, dict]) -> None:
         print("no sessions found")
         return
     width = max(len(n) for n in rows)
-    for row in sorted(rows.values(), key=lambda r: (r["state"] != IDLE, r["name"])):
+    order = {FAILED: 0, GONE: 1, IDLE: 2, UNKNOWN: 3, WORKING: 4}
+    for row in sorted(rows.values(), key=lambda r: (order[r["state"]], r["name"])):
         print(fmt(row, width))
 
 
@@ -255,7 +278,10 @@ def main() -> int:
         rows = snapshot(cwd, ignore)
 
         if args.quorum == "all":
-            live = [r for r in rows.values() if r["state"] in (WORKING, IDLE)]
+            live = [
+                r for r in rows.values()
+                if r["state"] in (WORKING, IDLE, FAILED)
+            ]
             if live and all(settled(r, args.dwell) for r in live):
                 print(f"ALL STOPPED — {len(live)} session(s), none working")
                 report(rows)
@@ -268,7 +294,11 @@ def main() -> int:
             ]
             if stopped:
                 for row in stopped:
-                    verb = "ended its turn" if row["state"] == IDLE else "exited"
+                    verb = {
+                        IDLE: "ended its turn",
+                        FAILED: "DIED ON AN API ERROR",
+                        GONE: "exited",
+                    }.get(row["state"], "stopped")
                     print(f"{row['name']} {verb} — idle {row['idle_for']:.0f}s")
                     if row["tail"]:
                         print(f"  last said: {row['tail'][:400]}")
