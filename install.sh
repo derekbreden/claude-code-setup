@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wire this repo's Claude Code customizations into ~/.claude.
+# Wire this repo's Claude Code and Codex customizations into their clients.
 #
 # This is the single place that registers everything touching ~/.claude, so the
 # convention can't drift: add an artifact, register it here. Re-runnable.
@@ -22,3 +22,11 @@ chmod +x "$REPO"/hooks/*.sh 2>/dev/null || true
 echo
 echo "hooks live at: $REPO/hooks/"
 echo "reference them in ~/.claude/settings.json as:  $REPO/hooks/<name>.sh"
+
+# 3) Codex discovers personal skills under ~/.codex/skills/. Keep the tracked
+#    source here and expose the directory itself, so edits take effect without a
+#    copied installation drifting away from the repo.
+mkdir -p "$HOME/.codex/skills"
+ln -sfn "$REPO/codex/skills/relay" "$HOME/.codex/skills/relay"
+echo
+echo "skill    -> ~/.codex/skills/relay"

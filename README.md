@@ -1,18 +1,17 @@
 # claude-code-setup
 
-My Claude Code customizations for macOS, in one repo. Each area is a top-level
-folder; one `install.sh` wires them into `~/.claude`.
+My Claude Code customizations for macOS, plus the Codex relay that reads the
+same kind of clean transcript. One `install.sh` wires them into their clients.
 
-| Folder | What it is | How it reaches Claude Code |
+| Folder | What it is | How it reaches the client |
 | --- | --- | --- |
 | `hooks/` | Bash guardrail hooks (Stop, PreToolUse, PostToolUse, UserPromptSubmit, SessionStart) — effort estimates, unexplained hedges, residue, abandoned forks, etc. | referenced by absolute path from `~/.claude/settings.json` |
 | `jsonl2md/` | Session export + `delta`/`watch` tools, and the `/relay` pull command (`commands/`, doc in `SALON.md`) | `jsonl2md.py` is a CLI; `commands/relay.md` is symlinked into `~/.claude/commands/` |
+| `codex/` | The Codex `relay` skill: exact-title, complete user/assistant transcript reads | symlinked into `~/.codex/skills/relay/` |
 
-The two mechanisms differ by design: hooks are only discovered via `settings.json`
-path entries (there is no `~/.claude/hooks/` auto-load), and slash commands are only
-discovered under `~/.claude/commands/`. Neither can adopt the other's wiring — so
-`install.sh` is the one place that performs both, and the rule is simply: **anything
-that wires into `~/.claude` gets registered in `install.sh`.**
+The mechanisms differ by design: Claude hooks are discovered through `settings.json`,
+Claude slash commands under `~/.claude/commands/`, and Codex skills under
+`~/.codex/skills/`. `install.sh` performs all three registrations.
 
 ## Install
 
@@ -20,10 +19,10 @@ that wires into `~/.claude` gets registered in `install.sh`.**
 ./install.sh
 ```
 
-Symlinks every `jsonl2md/commands/*.md` into `~/.claude/commands/`, ensures the hooks
-are executable, and prints the base path to reference them from `~/.claude/settings.json`.
-Re-runnable. The `settings.json` hook entries are hand-curated and not rewritten by the
-script.
+Symlinks every `jsonl2md/commands/*.md` into `~/.claude/commands/`, the Codex relay skill
+into `~/.codex/skills/`, ensures the hooks are executable, and prints the base path to
+reference them from `~/.claude/settings.json`. Re-runnable. The `settings.json` hook
+entries are hand-curated and not rewritten by the script.
 
 See [`jsonl2md/SALON.md`](jsonl2md/SALON.md) for the `/relay` pull shortcut — bringing one
 session's clean transcript into another — and the `delta`/`watch` tools behind it.

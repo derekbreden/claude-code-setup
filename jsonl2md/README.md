@@ -1,6 +1,6 @@
 # jsonl2md
 
-Export Claude conversations from the macOS Claude.app desktop client to clean Markdown.
+Export Claude conversations and local Codex tasks to clean Markdown.
 
 This is a personal tool, put on GitHub in case it helps someone with the same setup. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
 
@@ -8,35 +8,43 @@ This is a personal tool, put on GitHub in case it helps someone with the same se
 
 You'll get value from this if **all** of the following are true:
 
-- You're on **macOS** and use [Claude.app](https://claude.ai/download) (the desktop client).
+- You're on **macOS** and use [Claude.app](https://claude.ai/download), the Codex desktop app,
+  or both.
 - You want plain Markdown transcripts of either:
   - **Claude Code sessions** that show in the Claude.app sidebar — i.e. ones you've given a custom title and not archived, **or**
-  - **Main Claude.ai chats** from the same desktop app's sidebar (recent N).
+  - **Main Claude.ai chats** from the same desktop app's sidebar (recent N), **or**
+  - **User-titled Codex tasks** in the current project.
 - You want **just the spoken text** — what you typed and what Claude wrote back. Nothing else.
 
 You will *not* get value from this if:
 
 - You're on **Linux or Windows**. Cookie decryption uses the macOS Keychain; session paths are macOS-specific.
 - You want **tool calls, tool results, thinking blocks, system reminders, attachments, or files** in the output. They are dropped on purpose.
-- You want to export **Claude Code sessions you haven't given a custom title to**, or sessions you've archived. The filter requires `titleSource: "user"` and `isArchived: false`. There is no flag to widen this.
+- You want to export untitled or archived sessions. The Claude and Codex task lists are deliberately the user-titled, non-archived surface.
 - You need a **UI, fuzzy matching, partial-name search, paging beyond a single `--limit`, or anything beyond a list-and-export CLI**.
 
 When I went looking for a tool that did this, I couldn't find one. Maybe the audience is small, but it's not zero.
 
 ## What it does
 
-Two sources, each with a list verb and an export verb, plus a standalone renderer:
+Three sources, each with a list verb and an export verb, plus a standalone renderer:
 
 | Source | List | Export |
 | --- | --- | --- |
 | Claude Code sessions (current project) | `list-sessions` | `export-session "<title>"` |
 | Claude.ai chats (desktop app sidebar)  | `list-chats`    | `export-chat "<name>"` |
+| Codex desktop tasks (current project) | `list-codex-sessions` | `export-codex-session "<title>"` |
 
 `export-session` and `export-chat` both accept `--all` and `--out <dir>`. The chat commands also accept `--limit N` (default 30) since the Claude.ai API is paged.
 
 Plus `render <path.jsonl>` — standalone, render any Claude Code transcript file (or stdin) to Markdown on stdout, no metadata lookup.
 
 Run `./jsonl2md.py` with no arguments to see the full help and example commands.
+
+The Codex export reads the desktop app's normalized local history projection and keeps
+only user-authored messages and visible assistant prose. Reasoning, commands, tool calls
+and outputs, system/developer context, and peer-task delivery envelopes do not enter the
+Markdown.
 
 ### Sharing only what's new: `delta` and `watch`
 
@@ -72,6 +80,10 @@ ln -s "$PWD/commands/relay.md" ~/.claude/commands/relay.md
 ## Usage
 
 ```sh
+# Codex desktop tasks (current project on disk)
+./jsonl2md.py list-codex-sessions
+./jsonl2md.py export-codex-session "Manager 2" --out /tmp
+
 # Claude Code sessions (current project on disk)
 ./jsonl2md.py list-sessions
 ./jsonl2md.py list-sessions --cwd /Users/me/some-other-project

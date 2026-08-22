@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""jsonl2md - list and export Claude conversations from the macOS Claude.app as markdown.
+"""jsonl2md - export clean Claude and Codex conversations as markdown.
 
-Two sources, each with a list verb and an export verb, plus a standalone renderer:
+Three sources, each with a list verb and an export verb, plus a standalone renderer:
 
   Claude Code sessions (a project on disk):
     list-sessions          List titled desktop sessions + VSCode-extension
@@ -14,6 +14,10 @@ Two sources, each with a list verb and an export verb, plus a standalone rendere
     list-chats             List the top --limit chats in sidebar order.
     export-chat <name>     Export one chat to .md (filename = chat name).
     export-chat --all      Export every chat in the top --limit window.
+
+  Codex desktop tasks (current project):
+    list-codex-sessions          List user-titled, non-archived tasks.
+    export-codex-session <title> Export one task's complete visible dialogue.
 
   Standalone:
     render <path.jsonl>    Render any Claude Code .jsonl (or stdin) to .md on stdout.
@@ -56,6 +60,23 @@ CLAUDE_APP_DIR = os.path.expanduser("~/Library/Application Support/Claude")
 COOKIE_DB = os.path.join(CLAUDE_APP_DIR, "Cookies")
 KEYCHAIN_SERVICE = "Claude Safe Storage"
 KEYCHAIN_ACCOUNT = "Claude Key"
+CODEX_HOME = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
+
+
+def _latest_codex_db(stem):
+    paths = glob.glob(os.path.join(CODEX_HOME, f"{stem}_*.sqlite"))
+    if not paths:
+        return os.path.join(CODEX_HOME, f"{stem}_1.sqlite")
+
+    def version(path):
+        match = re.search(r"_(\d+)\.sqlite$", path)
+        return int(match.group(1)) if match else -1
+
+    return max(paths, key=version)
+
+
+CODEX_STATE_DB = _latest_codex_db("state")
+CODEX_HISTORY_DB = _latest_codex_db("thread_history")
 
 
 def iter_records(text):
@@ -93,6 +114,153 @@ def render_md(records):
         label = "User" if role == "user" else "Assistant"
         blocks.append(f"---\n\n# {label}\n\n---\n\n{text}\n")
     return "\n".join(blocks)
+
+
+# --- Codex desktop tasks -----------------------------------------------------
+#
+# `state_5.sqlite` carries the task names the desktop app shows. The history
+# projection beside it carries normalized UI items: a real prompt is a
+# `userMessage`, visible agent prose is an `agentMessage`, and tools/reasoning
+# are different item types. Reading those two types is the Codex equivalent of
+# `extract_message` above, without having to reverse-engineer system/developer
+# envelopes from the rollout JSONL.
+
+
+def _sqlite_readonly(path):
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+    db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA query_only = ON")
+    return db
+
+
+def list_codex_sessions(target_cwd):
+    """User-titled, non-archived Codex tasks in the named project."""
+    cwd = os.path.realpath(os.path.expanduser(target_cwd))
+    with _sqlite_readonly(CODEX_STATE_DB) as db:
+        rows = db.execute(
+            """
+            SELECT id, name AS title, recency_at_ms, history_mode
+              FROM threads
+             WHERE cwd = ?
+               AND archived = 0
+               AND name IS NOT NULL
+               AND name <> ''
+               AND (thread_source IS NULL OR thread_source = 'user')
+             ORDER BY recency_at_ms DESC, id DESC
+            """,
+            (cwd,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def resolve_codex_target(positional, cwd):
+    """Resolve one exact task title, or an exact/unique thread-id prefix."""
+    sessions = list_codex_sessions(cwd)
+    by_title = [s for s in sessions if s["title"] == positional]
+    if len(by_title) == 1:
+        return by_title[0]
+    if len(by_title) > 1:
+        sys.stderr.write(
+            f"Ambiguous Codex task title {positional!r} ({len(by_title)} matches). "
+            "Pass a thread id:\n"
+        )
+        for s in by_title:
+            sys.stderr.write(f"  {s['id']}\n")
+        sys.exit(1)
+    by_id = [s for s in sessions if s["id"].startswith(positional)]
+    if len(by_id) == 1:
+        return by_id[0]
+    if len(by_id) > 1:
+        sys.stderr.write(f"Codex thread-id prefix {positional!r} matches {len(by_id)} tasks:\n")
+        for s in by_id:
+            sys.stderr.write(f"  {s['id']}  {s['title']}\n")
+        sys.exit(1)
+    sys.stderr.write(f"No user-titled Codex task {positional!r} in {os.path.realpath(cwd)}.\n")
+    sys.stderr.write("Run 'jsonl2md.py list-codex-sessions' to see exact titles.\n")
+    sys.exit(1)
+
+
+def codex_dialogue(thread_id):
+    """Every visible human/agent text item, in rollout order.
+
+    `codex_delegation` is the receiving shape for peer-task traffic. It is a
+    normalized `userMessage` because it enters the model as input, but it is not
+    something Derek said in the task and does not appear in a clean two-speaker
+    transcript.
+    """
+    with _sqlite_readonly(CODEX_HISTORY_DB) as db:
+        rows = db.execute(
+            """
+            SELECT item_json
+              FROM thread_items
+             WHERE thread_id = ?
+               AND item_type IN ('userMessage', 'agentMessage')
+             ORDER BY rollout_ordinal
+            """,
+            (thread_id,),
+        ).fetchall()
+    turns = []
+    for row in rows:
+        item = json.loads(row["item_json"])
+        if item.get("type") == "userMessage":
+            text = "\n\n".join(
+                part.get("text", "")
+                for part in item.get("content", [])
+                if part.get("type") == "text"
+            ).strip()
+            if text.startswith("<codex_delegation>"):
+                continue
+            role = "user"
+        elif item.get("type") == "agentMessage":
+            text = (item.get("text") or "").strip()
+            role = "assistant"
+        else:
+            continue
+        if text:
+            turns.append((role, text))
+    return turns
+
+
+def render_dialogue(turns):
+    blocks = []
+    for role, text in turns:
+        label = "User" if role == "user" else "Assistant"
+        blocks.append(f"---\n\n# {label}\n\n---\n\n{text}\n")
+    return "\n".join(blocks)
+
+
+def cmd_list_codex_sessions(args):
+    rows = list_codex_sessions(args.cwd)
+    width = max((len(s["title"]) for s in rows), default=0)
+    for s in rows:
+        print(f'{s["title"]:<{width}}  {s["id"]}')
+
+
+def cmd_export_codex_session(args):
+    sessions = list_codex_sessions(args.cwd)
+    if args.all:
+        targets = sessions
+    elif args.title:
+        targets = [resolve_codex_target(args.title, args.cwd)]
+    else:
+        print("export-codex-session: provide a title or --all", file=sys.stderr)
+        sys.exit(2)
+    os.makedirs(args.out, exist_ok=True)
+    for task in targets:
+        turns = codex_dialogue(task["id"])
+        if not turns:
+            print(
+                f"No projected user/assistant dialogue for {task['title']!r} "
+                f"({task['id']}; history mode {task['history_mode']}).",
+                file=sys.stderr,
+            )
+            continue
+        md_path = os.path.join(args.out, safe_name(task["title"]) + ".md")
+        with open(md_path, "w") as f:
+            f.write(render_dialogue(turns))
+        print(md_path)
 
 
 # --- delta / watch: share only what's new since you last shared ---------------
@@ -742,6 +910,10 @@ def cmd_send(args):
 
 EPILOG = """\
 examples:
+  # Codex desktop tasks: complete visible dialogue, no tools/reasoning/system context
+  jsonl2md.py list-codex-sessions
+  jsonl2md.py export-codex-session "Manager 2" --out /tmp
+
   # Claude Code sessions (current project on disk)
   jsonl2md.py list-sessions
   jsonl2md.py list-sessions --cwd /path/to/other/project
@@ -801,8 +973,36 @@ def main():
     )
     sub = ap.add_subparsers(
         dest="cmd",
-        metavar="{list-sessions,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
+        metavar="{list-codex-sessions,export-codex-session,list-sessions,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
     )
+
+    p_cls = sub.add_parser(
+        "list-codex-sessions",
+        help="list user-titled, non-archived Codex desktop tasks",
+    )
+    p_cls.add_argument("--cwd", default=DEFAULT_CWD,
+                       help=f"project path to filter by (default: {DEFAULT_CWD})")
+    p_cls.set_defaults(func=cmd_list_codex_sessions)
+
+    p_ces = sub.add_parser(
+        "export-codex-session",
+        help="export complete visible dialogue from Codex task(s) to .md",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_ces.add_argument(
+        "title",
+        nargs="?",
+        help="exact task title, or a thread id / unique prefix "
+             "(use 'list-codex-sessions' to see them); omit when using --all",
+    )
+    p_ces.add_argument("--all", action="store_true",
+                       help="export every visible user-titled task in the target cwd")
+    p_ces.add_argument("--cwd", default=DEFAULT_CWD,
+                       help=f"project path to filter by (default: {DEFAULT_CWD})")
+    p_ces.add_argument("--out", default=".",
+                       help="output directory (default: current dir)")
+    p_ces.set_defaults(func=cmd_export_codex_session)
 
     p_ls = sub.add_parser("list-sessions", help="list titled desktop + VSCode-extension Claude Code sessions")
     p_ls.add_argument("--cwd", default=DEFAULT_CWD,
