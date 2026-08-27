@@ -35,6 +35,9 @@ Three sources, each with a list verb and an export verb, plus a standalone rende
 | Claude.ai chats (desktop app sidebar)  | `list-chats`    | `export-chat "<name>"` |
 | Codex desktop tasks (current project) | `list-codex-sessions` | `export-codex-session "<title>"` |
 
+Plus `recent-prompts` — the last things *you* asked for, newest first, across every session
+at once.
+
 `export-session` and `export-chat` both accept `--all` and `--out <dir>`. The chat commands also accept `--limit N` (default 30) since the Claude.ai API is paged.
 
 Plus `render <path.jsonl>` — standalone, render any Claude Code transcript file (or stdin) to Markdown on stdout, no metadata lookup.
@@ -45,6 +48,61 @@ The Codex export reads the desktop app's normalized local history projection and
 only user-authored messages and visible assistant prose. Reasoning, commands, tool calls
 and outputs, system/developer context, and peer-task delivery envelopes do not enter the
 Markdown.
+
+### Your side of it: `recent-prompts`
+
+The exports are per session, and a transcript is mostly agent. `recent-prompts` inverts
+both: it reads every session in the project, keeps only the turns **you** typed, and prints
+them newest first with the timestamp and the exact place each one lives.
+
+```sh
+./jsonl2md.py recent-prompts                     # top 5, in full
+./jsonl2md.py recent-prompts -n 20 --chars 300   # more of them, each clipped
+./jsonl2md.py recent-prompts --session "PCB clean"
+./jsonl2md.py recent-prompts -n 0 --json         # all of them, machine-readable
+```
+
+```
+2026-08-26 22:32:21 -0500  Zip tie 2
+  ~/.claude/projects/-Users-…-homesodamachine/73e77039-….jsonl:3  a162cee0-97f6-…
+  | /relay Zip tie
+  |
+  | Whatever this agent claimed as "not mine" please take ownership of and see to resolution.
+```
+
+The user side of a transcript is not all speech. Tool results come back as role `user`, and
+so does everything the harness posts under your name: background-task notifications, local
+command output, the expanded body of a slash command, a peer session's message. All of that
+is dropped. A slash command renders as the line you actually typed (`/relay Zip tie`), an
+attached quote keeps the quote and loses its marker, and spliced-in system reminders are cut
+out. The same filter now runs for every verb, so `export-session` and `delta` are clean too.
+
+### Reading everything at once: `--compact`
+
+A long session is mostly agent. Between two things you said there can be dozens of assistant
+messages, one per tool step, and the shape of that run reads off its first lines and its
+last: what it set out to do, and what it landed. The middle is the working.
+
+`--compact [N]` coalesces each run of consecutive assistant turns into one block and cuts
+that middle out, keeping N lines at either end (default 6). **Your own turns are never cut** —
+they are the spine the rest hangs off, and the reason to read a compacted transcript at all.
+
+```sh
+./jsonl2md.py export-session --all --compact --out ./compact   # every titled session
+./jsonl2md.py export-session --all --compact 3 --out ./tighter
+./jsonl2md.py delta "PCB clean" --tail 40 --compact
+./jsonl2md.py render path/to/session.jsonl --compact
+```
+
+The cut is marked in place, and it counts both what it removed and how many messages it
+spanned:
+
+```
+[... 39 lines across 11 messages ...]
+```
+
+Across twelve live sessions that is roughly 500 KB of transcript down to 100 KB — small
+enough to read the whole project's dialogue in one pass.
 
 ### Sharing only what's new: `delta` and `watch`
 
@@ -90,6 +148,11 @@ ln -s "$PWD/commands/relay.md" ~/.claude/commands/relay.md
 ./jsonl2md.py export-session "Professor - done"
 ./jsonl2md.py export-session "Professor - done" --out ~/Desktop
 ./jsonl2md.py export-session --all --out ./exports
+./jsonl2md.py export-session --all --compact --out ./compact
+
+# What you asked for most recently, across every session
+./jsonl2md.py recent-prompts
+./jsonl2md.py recent-prompts -n 20 --chars 300
 
 # Claude.ai chats (desktop app sidebar)
 ./jsonl2md.py list-chats
@@ -143,7 +206,7 @@ This list exists because each item is a thing somebody might reasonably want dif
 - **`DEFAULT_CWD` is hardcoded to the author's project path.** Pass `--cwd` every time, or change the constant at the top of `jsonl2md.py` in your fork.
 - **The session filter is fixed.** `list-sessions` and `export-session` only see custom-titled, non-archived sessions in the target cwd. There is no flag to widen it. Sessions you never named are invisible to this tool — that's the whole point of the filter, since it matches Claude.app's visible sidebar exactly.
 - **`list-chats` and `export-chat --all` are bounded by `--limit`** (default 30). The Claude.ai API supports paging; I have never needed it. Bump the limit if you need older chats.
-- **Tool calls, tool results, thinking blocks, system messages, attachments, and files are unconditionally stripped.** There is no flag to include them. The whole reason the tool exists is to produce a transcript of just the spoken text.
+- **Tool calls, tool results, thinking blocks, system messages, attachments, and files are unconditionally stripped.** There is no flag to include them. The whole reason the tool exists is to produce a transcript of just the spoken text. That includes the things the harness posts under *your* name — task notifications, peer-session messages, command bodies, local command output — which are system messages wearing a user record.
 - **Output filenames are the session/chat title verbatim**, with `/`, `\`, and `:` replaced by `_`. Filename collisions silently overwrite.
 - **macOS only.** The cookie decryption format, keychain service name, and filesystem paths are all macOS-specific. A Linux/Windows port would need new code in three places.
 - **No license file.** Treat it as a reference implementation; copy what's useful.

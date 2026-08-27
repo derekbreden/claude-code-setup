@@ -6,9 +6,14 @@ Three sources, each with a list verb and an export verb, plus a standalone rende
   Claude Code sessions (a project on disk):
     list-sessions          List titled desktop sessions + VSCode-extension
                            sessions in --cwd.
+    recent-prompts         What you last asked for, newest first, across every
+                           session at once -- timestamp, text, and the line it
+                           lives on.
     export-session <title> Export one session to .md (filename = title). Also
                            accepts a raw cliSessionId (or unique prefix).
     export-session --all   Export every session matching the filter.
+    ... --compact [N]      Cut the middle out of each agent run, keeping N lines
+                           at either end. Your turns are never cut.
 
   Claude.ai chats (desktop app sidebar):
     list-chats             List the top --limit chats in sidebar order.
@@ -48,6 +53,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime
 from urllib.request import Request, urlopen
 
 DEFAULT_CWD = "/Users/derekbredensteiner/Developer/homesodamachine"
@@ -92,6 +98,44 @@ def iter_records(text):
         i = end
 
 
+# The user side of a transcript is not all speech. Tool results come back as
+# role "user", and so does everything the harness posts under the user's name:
+# background-task notifications, local command output, the expanded body of a
+# slash command, a peer session's message. Each is either flagged
+# (`toolUseResult`, `isMeta`, `isSidechain`) or wears its own envelope tag, so
+# what the human typed is separable from what was typed for them.
+
+SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
+COMMAND_NAME_RE = re.compile(r"<command-name>\s*(.*?)\s*</command-name>", re.S)
+COMMAND_ARGS_RE = re.compile(r"<command-args>\s*(.*?)\s*</command-args>", re.S)
+ATTACH_MARK_RE = re.compile(r"^<!--\s*attach\s*-->[ \t]*\n?", re.M)
+INJECTED = (
+    "<task-notification>",
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "<cross-session-message",
+    "Another Claude session sent a message:",
+)
+
+
+def user_speech(obj, text):
+    """What the human typed in this user record, or "" if they typed nothing.
+
+    A slash command arrives as an envelope and renders as the line you actually
+    typed, `/name args`; an attached quote keeps the quote and drops its marker;
+    system reminders are cut wherever they were spliced in."""
+    if "toolUseResult" in obj or obj.get("isSidechain") or obj.get("isMeta"):
+        return ""
+    text = SYSTEM_REMINDER_RE.sub("", text).strip()
+    if not text or text.startswith(INJECTED):
+        return ""
+    name = COMMAND_NAME_RE.search(text)
+    if name:
+        args = COMMAND_ARGS_RE.search(text)
+        return f"{name.group(1)} {args.group(1) if args else ''}".strip()
+    return ATTACH_MARK_RE.sub("", text).strip()
+
+
 def extract_message(obj):
     msg = obj.get("message") or {}
     role = msg.get("role") or obj.get("type")
@@ -102,18 +146,64 @@ def extract_message(obj):
         text = "\n\n".join(p.get("text", "") for p in content if p.get("type") == "text")
     else:
         text = ""
-    return role, text.strip()
+    text = text.strip()
+    if role == "user":
+        text = user_speech(obj, text)
+    return role, text
 
 
-def render_md(records):
+# A long session is mostly agent. Between two things you said there can be
+# dozens of assistant messages, one per tool step, and the shape of that run
+# reads off its first lines and its last: what it set out to do, and what it
+# landed. The middle is the working. Compaction coalesces each run of
+# consecutive assistant turns into one block and cuts that middle out, keeping
+# N lines at either end. Your own turns are never cut -- they are the spine the
+# rest hangs off, and the reason to read a compacted transcript at all.
+
+
+def turns_of(records):
+    return [(r, t) for r, t in (extract_message(o) for o in records)
+            if r in ("user", "assistant") and t]
+
+
+def agent_runs(turns):
+    """[(role, text)] -> [(role, text, n_messages)] with consecutive assistant
+    turns merged, so one elision spans a whole run instead of each message."""
+    out = []
+    for role, text in turns:
+        if role == "assistant" and out and out[-1][0] == "assistant":
+            _, prev, n = out[-1]
+            out[-1] = (role, prev + "\n\n" + text, n + 1)
+        else:
+            out.append((role, text, 1))
+    return out
+
+
+def elide_middle(text, keep, n_messages=1):
+    """Keep the first and last `keep` lines; replace the rest with a count. The
+    guard is 2*keep+4, not 2*keep, so a block can never come back longer than
+    it went in."""
+    lines = text.split("\n")
+    if len(lines) <= 2 * keep + 4:
+        return text
+    cut = len(lines) - 2 * keep
+    across = f" across {n_messages} messages" if n_messages > 1 else ""
+    return "\n".join(lines[:keep] + ["", f"[... {cut} lines{across} ...]", ""] + lines[-keep:])
+
+
+def render_blocks(turns, compact=0):
+    runs = agent_runs(turns) if compact else [(r, t, 1) for r, t in turns]
     blocks = []
-    for obj in records:
-        role, text = extract_message(obj)
-        if role not in ("user", "assistant") or not text:
-            continue
+    for role, text, n in runs:
+        if compact and role == "assistant":
+            text = elide_middle(text, compact, n)
         label = "User" if role == "user" else "Assistant"
         blocks.append(f"---\n\n# {label}\n\n---\n\n{text}\n")
     return "\n".join(blocks)
+
+
+def render_md(records, compact=0):
+    return render_blocks(turns_of(records), compact)
 
 
 # --- Codex desktop tasks -----------------------------------------------------
@@ -318,17 +408,14 @@ def split_after_cursor(records, cursor_uuid):
     return records, False
 
 
-def render_tail(records, k):
+def render_tail(records, k, compact=0):
     """Render only the last k user+assistant exchanges (2k text turns). Slices
     the list of turns, not the rendered string, so a turn whose own text
     contains the '# User' delimiter can't split wrong."""
-    turns = [(r, t) for r, t in (extract_message(o) for o in records)
-             if r in ("user", "assistant") and t]
+    turns = turns_of(records)
     if k and k > 0:
         turns = turns[-2 * k:]
-    blocks = [f"---\n\n# {'User' if r == 'user' else 'Assistant'}\n\n---\n\n{t}\n"
-              for r, t in turns]
-    return "\n".join(blocks)
+    return render_blocks(turns, compact)
 
 
 def cursor_path(cli_id):
@@ -632,6 +719,101 @@ def cmd_list_sessions(args):
             print(f'{s["title"]:<{width}}  → relay only (no peer channel)')
 
 
+# --- recent-prompts: what you said last, and where it is ----------------------
+#
+# The transcripts are the only record of your side of the work that carries a
+# timestamp. Reading the last things you asked for, newest first and across
+# every session at once, is how you see what you are actually driving at right
+# now -- which is not the same question as what any one session is doing.
+
+
+def iter_located(text):
+    """Like iter_records_safe, but yields (record, line) -- the 1-based line the
+    record starts on, so a prompt can be pointed at where it lives on disk."""
+    decoder = json.JSONDecoder()
+    i, n, line = 0, len(text), 1
+    while i < n:
+        while i < n and text[i].isspace():
+            line += text[i] == "\n"
+            i += 1
+        if i >= n:
+            break
+        try:
+            obj, end = decoder.raw_decode(text, i)
+        except ValueError:
+            break  # trailing partial record; a live session is mid-write
+        yield obj, line
+        line += text.count("\n", i, end)
+        i = end
+
+
+def local_time(ts):
+    """Transcript timestamps are UTC; you live in one timezone and remember the
+    hour you typed something, so they print local."""
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime(
+            "%Y-%m-%d %H:%M:%S %z")
+    except (AttributeError, ValueError):
+        return ts or "(undated)"
+
+
+def session_prompts(session):
+    """Every human turn in one session, oldest first, each with its timestamp
+    and its location. A session whose transcript is gone contributes none."""
+    path = jsonl_path_for(session["cliSessionId"], session["cwd"])
+    try:
+        text = open(path, errors="replace").read()
+    except OSError:
+        return []
+    out = []
+    for obj, line in iter_located(text):
+        if obj.get("type") != "user":
+            continue
+        role, said = extract_message(obj)
+        if role != "user" or not said:
+            continue
+        out.append({
+            "when": obj.get("timestamp"),
+            "session": session.get("title"),
+            "path": path,
+            "line": line,
+            "uuid": obj.get("uuid"),
+            "text": said,
+        })
+    return out
+
+
+def cmd_recent_prompts(args):
+    sessions = list_sessions(args.cwd)
+    if args.session:
+        cli_id, label = resolve_target(args.session, args.cwd)
+        sessions = ([s for s in sessions if s.get("cliSessionId") == cli_id]
+                    or [{"cliSessionId": cli_id, "cwd": args.cwd, "title": label}])
+    prompts = []
+    for s in sessions:
+        if s.get("cliSessionId"):
+            prompts.extend(session_prompts(s))
+    prompts.sort(key=lambda p: p["when"] or "", reverse=True)
+    if args.limit > 0:
+        prompts = prompts[:args.limit]
+    if args.json:
+        json.dump(prompts, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+    if not prompts:
+        sys.stderr.write(f"no prompts found in {args.cwd}\n")
+        return
+    for p in prompts:
+        text = p["text"]
+        if args.chars and len(text) > args.chars:
+            text = text[:args.chars].rstrip() + " ..."
+        print(f'{local_time(p["when"])}  {p["session"]}')
+        print(f'  {p["path"]}:{p["line"]}  {p["uuid"]}')
+        for ln in text.split("\n"):
+            print(f"  | {ln}" if ln else "  |")
+        print()
+
+
 def cmd_list_chats(args):
     for c in list_chats(args.limit):
         print(c.get("name") or "(untitled)")
@@ -668,7 +850,7 @@ def cmd_export_session(args):
         if not os.path.exists(jsonl):
             print(f"missing transcript: {jsonl}", file=sys.stderr)
             continue
-        md = render_md(iter_records(open(jsonl).read()))
+        md = render_md(iter_records(open(jsonl).read()), args.compact)
         base = safe_name(s["title"])
         md_path = os.path.join(args.out, base + ".md")
         with open(md_path, "w") as f:
@@ -706,7 +888,7 @@ def cmd_export_chat(args):
 
 def cmd_render(args):
     text = open(args.path).read() if args.path else sys.stdin.read()
-    sys.stdout.write(render_md(iter_records(text)))
+    sys.stdout.write(render_md(iter_records(text), args.compact))
 
 
 def cmd_delta(args):
@@ -723,7 +905,7 @@ def cmd_delta(args):
         clear_cursor(cli_id)
 
     if args.tail is not None:
-        md = render_tail(records, args.tail)
+        md = render_tail(records, args.tail, args.compact)
         sys.stdout.write(md + ("\n" if md and not md.endswith("\n") else ""))
         sys.stderr.write(f"[tail {args.tail}] {label} — cursor untouched ({cli_id})\n")
         return
@@ -744,7 +926,7 @@ def cmd_delta(args):
             f"Cursor {cursor_uuid} not in {label} (compaction / fork / clear?); "
             f"emitting the whole transcript. Re-run with --reset to rebaseline.\n")
 
-    md = render_md(tail)
+    md = render_md(tail, args.compact)
     if md.strip():
         sys.stdout.write(md + ("\n" if not md.endswith("\n") else ""))
     else:
@@ -923,6 +1105,17 @@ examples:
   jsonl2md.py export-session "VSCode Extension - 303f72e5"  # a VSCode-ext session
   jsonl2md.py export-session 303f72e5                       # ...or by id prefix
 
+  # The last things YOU asked for, newest first, across every session at once
+  jsonl2md.py recent-prompts                  # top 5, in full, with timestamp + location
+  jsonl2md.py recent-prompts -n 20 --chars 300
+  jsonl2md.py recent-prompts --session "PCB clean"
+  jsonl2md.py recent-prompts -n 0 --json      # every prompt, machine-readable
+
+  # Read every session at once: your turns whole, each agent run cut in the middle
+  jsonl2md.py export-session --all --compact --out ./compact
+  jsonl2md.py export-session --all --compact 3 --out ./tighter
+  jsonl2md.py delta "PCB clean" --tail 40 --compact
+
   # Claude.ai chats (desktop app sidebar)
   jsonl2md.py list-chats
   jsonl2md.py list-chats --limit 50
@@ -973,7 +1166,7 @@ def main():
     )
     sub = ap.add_subparsers(
         dest="cmd",
-        metavar="{list-codex-sessions,export-codex-session,list-sessions,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
+        metavar="{list-codex-sessions,export-codex-session,list-sessions,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
     )
 
     p_cls = sub.add_parser(
@@ -1009,6 +1202,25 @@ def main():
                      help=f"project path to filter by (default: {DEFAULT_CWD})")
     p_ls.set_defaults(func=cmd_list_sessions)
 
+    p_rp = sub.add_parser(
+        "recent-prompts",
+        help="what you last asked for, newest first, across every session in --cwd",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_rp.add_argument("-n", "--limit", type=int, default=5,
+                      help="how many prompts to show (default: 5; 0 = all)")
+    p_rp.add_argument("--session", default=None,
+                      help="only this session (exact title or a cliSessionId); "
+                           "default is every session in --cwd")
+    p_rp.add_argument("--chars", type=int, default=0, metavar="N",
+                      help="truncate each prompt to N characters (default: print in full)")
+    p_rp.add_argument("--json", action="store_true",
+                      help="emit the records as JSON instead of the readable listing")
+    p_rp.add_argument("--cwd", default=DEFAULT_CWD,
+                      help=f"project path to filter by (default: {DEFAULT_CWD})")
+    p_rp.set_defaults(func=cmd_recent_prompts)
+
     p_es = sub.add_parser(
         "export-session",
         help="export Claude Code session(s) to .md",
@@ -1024,6 +1236,8 @@ def main():
                      help=f"project path to filter by (default: {DEFAULT_CWD})")
     p_es.add_argument("--out", default=".",
                      help="output directory (default: current dir)")
+    p_es.add_argument("--compact", nargs="?", type=int, const=6, default=0, metavar="N",
+                     help="coalesce each run of consecutive assistant turns and cut its middle, keeping N lines at either end (default 6 when N is omitted); your own turns are never cut")
     p_es.set_defaults(func=cmd_export_session)
 
     p_lc = sub.add_parser("list-chats", help="list main Claude.ai chats from the desktop app sidebar")
@@ -1050,6 +1264,8 @@ def main():
     p_ren = sub.add_parser("render", help="render a JSONL file or stdin to markdown on stdout")
     p_ren.add_argument("path", nargs="?",
                       help="path to a .jsonl file (omit to read from stdin)")
+    p_ren.add_argument("--compact", nargs="?", type=int, const=6, default=0, metavar="N",
+                      help="coalesce each run of consecutive assistant turns and cut its middle, keeping N lines at either end (default 6 when N is omitted); your own turns are never cut")
     p_ren.set_defaults(func=cmd_render)
 
     p_delta = sub.add_parser(
@@ -1068,6 +1284,8 @@ def main():
                         help="delete the saved cursor and share from the start")
     p_delta.add_argument("--first-share", action="store_true",
                         help="confirm emitting a whole transcript when no cursor exists yet")
+    p_delta.add_argument("--compact", nargs="?", type=int, const=6, default=0, metavar="N",
+                        help="coalesce each run of consecutive assistant turns and cut its middle, keeping N lines at either end (default 6 when N is omitted); your own turns are never cut")
     p_delta.set_defaults(func=cmd_delta)
 
     p_watch = sub.add_parser("watch", help="stream new user/assistant turns as the session grows")

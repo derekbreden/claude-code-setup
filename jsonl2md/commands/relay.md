@@ -19,7 +19,9 @@ Steps:
    `python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py export-session "<matched title>" --out /tmp`
    It prints the path of the `.md` it wrote. For a very long session, instead grab the tail:
    `python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py delta "<matched title>" --tail 40`
-   (prints the last 40 exchanges to stdout — no file).
+   (prints the last 40 exchanges to stdout — no file). To carry a long session whole rather
+   than only its end, add `--compact` to either: the user's turns come through intact and
+   each run of agent messages is cut in the middle, marked with what it removed.
 
 3. **Read them in.** Read each `.md` it wrote (or use the delta stdout). Then give the user a 2–4 line orientation **per session** — what it was doing and where it left off — plus a line on how they relate when they share a tree. Then ask what they want to bring over or do here, unless $ARGUMENTS already told you.
 
