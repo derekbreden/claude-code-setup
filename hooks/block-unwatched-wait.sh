@@ -94,9 +94,11 @@ if printf '%s\n' "$last_text" | grep -qEi \
 fi
 
 # Does the closing message claim a machine-shaped wait? Two halves must both appear:
-# a parked posture, and a thing that is supposed to fire.
-posture='(hold(ing)?|wait(ing)?|park(ed|ing)?|stopping here|stop(ping)? (here )?(rather than|with)|resum(e|ing)|pick (this|it) back up|no further (polling|action)|sole live background|nothing further queued|until (it|they|that) (reports?|lands?|finishes|completes?|fires?))'
-object='(notification|notif|background (job|task|command|child|children)|tracked (wait|job)|bounded (job|wait)|completion|the build|the derive|the regen|verification|it to (report|land|finish|complete|fire|notify)|reports? back|wakes? me|wake-?up)'
+# a parked posture, and a thing that is supposed to fire. Terms a longer word swallows
+# are anchored — untracked, unbounded, threshold, withholding, presume, sparked all
+# carry one of these inside them. Not wait, which has to keep matching in "awaiting".
+posture='(\bhold(ing)?|wait(ing)?|\bpark(ed|ing)?|stopping here|stop(ping)? (here )?(rather than|with)|\bresum(e|ing)|pick (this|it) back up|no further (polling|action)|sole live background|nothing further queued|until (it|they|that) (reports?|lands?|finishes|completes?|fires?))'
+object='(notification|notif|background (job|task|command|child|children)|\btracked (wait|job)|\bbounded (job|wait)|completion|the build|the derive|the regen|verification|it to (report|land|finish|complete|fire|notify)|reports? back|wakes? me|wake-?up)'
 
 if ! printf '%s\n' "$last_text" | grep -qEi "$posture"; then
   log_status "no_posture_match"
