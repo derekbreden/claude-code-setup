@@ -739,16 +739,49 @@ def _cloud_get(path):
         raise TranscriptError(f"GET {path}: {exc}")
 
 
+REPO_URL_RE = re.compile(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$")
+ORIGIN_SECTION_RE = re.compile(r'\[remote "origin"\](.*?)(?=^\[|\Z)', re.S | re.M)
+ORIGIN_URL_RE = re.compile(r"^\s*url\s*=\s*(\S+)", re.M)
+
+
+def _origin_url(cwd):
+    """origin's URL out of `.git/config`, without spawning git.
+
+    This runs on every list, and a subprocess costs more than the whole rest of
+    the listing put together. `.git` as a FILE is a worktree or a submodule
+    pointing somewhere else -- that indirection is git's to resolve, so those
+    fall through to git itself."""
+    d = os.path.abspath(cwd)
+    while True:
+        git = os.path.join(d, ".git")
+        if os.path.isdir(git):
+            try:
+                text = open(os.path.join(git, "config"), errors="replace").read()
+            except OSError:
+                return None
+            section = ORIGIN_SECTION_RE.search(text)
+            url = ORIGIN_URL_RE.search(section.group(1)) if section else None
+            return url.group(1) if url else None
+        if os.path.exists(git):
+            return None
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
 def project_repo(cwd):
     """`owner/name` of the checkout at cwd, which is the only thing a cloud
     session and a local directory have in common: the cloud worker has no cwd,
     it has the repository it was pointed at."""
-    out = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
-                         capture_output=True, text=True)
-    if out.returncode != 0:
-        return None
-    url = out.stdout.strip()
-    m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", url)
+    url = _origin_url(cwd)
+    if url is None:
+        out = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
+                             capture_output=True, text=True)
+        if out.returncode != 0:
+            return None
+        url = out.stdout.strip()
+    m = REPO_URL_RE.search(url)
     return m.group(1) if m else None
 
 

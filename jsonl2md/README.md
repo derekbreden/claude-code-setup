@@ -226,7 +226,9 @@ local trace is its id in `remote-session-spaces.json`. So it is read the way the
 - Only `environment_kind == "anthropic_cloud"` is listed. A cloud record also exists for each
   session running *here* (`bridge`), and that one is already listed from its own metadata and
   its own transcript.
-- The list is cached for a minute under `~/.jsonl2md/cloud/`, and a transcript is cached
+- The list is cached for a minute under `~/.jsonl2md/cloud/`, which is what keeps a listing
+  as fast as it was when every session was a file — on the warm path the added work is one
+  JSON read and an `origin` URL parsed out of `.git/config`. A transcript is cached
   against the session's `last_event_at` — a session that has not gained an event cannot have
   changed. When the network is gone the stale copy is served, so the sessions that *are* on
   this disk still list. `JSONL2MD_NO_CLOUD=1` skips the cloud entirely.
