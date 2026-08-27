@@ -76,6 +76,13 @@ there is another live session that needs help or guidance or there is anything u
 please pass it to them. Do not pass anything to me." **Do not tidy.** Reformatting, renaming,
 and doc polish nobody asked for is churn in a tree eight sessions are writing to.
 
+**No chips.** Never call `spawn_task`; never file a background-task suggestion, a task card, or
+a notification. A chip is not an exception to the rule above — it is that failure wearing a
+different hat, a piece of work parked where the human has to notice it, decide on it and start
+it. Anything that lands in their UI counts as passing it to them. Do it, route it to the session
+whose lane it is, or put it in the report to whoever invoked you. This binds every subagent you
+spawn, so put it in their prompts.
+
 ## 4. Act
 
 **Re-read the board first.** `situation` again, immediately before you do anything. This fleet
