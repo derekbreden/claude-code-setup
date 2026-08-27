@@ -35,8 +35,9 @@ Three sources, each with a list verb and an export verb, plus a standalone rende
 | Claude.ai chats (desktop app sidebar)  | `list-chats`    | `export-chat "<name>"` |
 | Codex desktop tasks (current project) | `list-codex-sessions` | `export-codex-session "<title>"` |
 
-Plus `recent-prompts` — the last things *you* asked for, newest first, across every session
-at once.
+Plus two views across the whole project at once: `recent-prompts` — the last things *you*
+asked for, newest first — and `situation`, the board of every session, how to reach it, and
+whether it is still moving.
 
 `export-session` and `export-chat` both accept `--all` and `--out <dir>`. The chat commands also accept `--limit N` (default 30) since the Claude.ai API is paged.
 
@@ -76,6 +77,36 @@ command output, the expanded body of a slash command, a peer session's message. 
 is dropped. A slash command renders as the line you actually typed (`/relay Zip tie`), an
 attached quote keeps the quote and loses its marker, and spliced-in system reminders are cut
 out. The same filter now runs for every verb, so `export-session` and `delta` are clean too.
+
+`--since` turns it into a question with a yes/no answer, and the exit status carries that
+answer — 0 if anything falls in the window, 1 if nothing does. That is the gate an automated
+caller needs:
+
+```sh
+./jsonl2md.py recent-prompts --since 1h -n 0 --exclude "$MY_SESSION" || exit 0
+```
+
+`--exclude` takes a title or a `cliSessionId` prefix and is repeatable. A tool that reads its
+own session counts its own prompts as the human's and finds work it already did, so anything
+automated passes its own id here.
+
+### Who else is here: `situation`
+
+```
+SESSION             ADDRESS             STATE     STOPPED    ASKED  LAST
+3mf                 3mf                 working         -      21m  `changed()` now reports only my own two files…
+Zip tie 2           Zip tie 2           STOPPED        2m      30m  Not mine — that's another session hardening…
+Manager 3           (relay only)        -               -    2h09m  > B — Box contains Pack instead of copying it…
+Clearances          homesodamachine-b0  STOPPED    11h06m   11h12m  Done and settled. **14/14 checks green…
+```
+
+A session is a title to you, a `name` to `SendMessage`, and a pid to the process table, and
+those three disagree — "Clearances" answers to `homesodamachine-b0`. Joining them by name is
+the mistake waiting to be made, so this joins them by `cliSessionId`, which all three carry.
+The state column comes from [`peer_idle.py`](peer_idle.py), imported rather than
+reimplemented. Live sessions that were never titled fold in under their peer name in
+parentheses: invisible to `list-sessions` by design, but still workers, still reachable, and
+possibly the ones holding something nobody owns.
 
 ### Reading everything at once: `--compact`
 

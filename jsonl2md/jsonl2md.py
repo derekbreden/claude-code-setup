@@ -8,7 +8,9 @@ Three sources, each with a list verb and an export verb, plus a standalone rende
                            sessions in --cwd.
     recent-prompts         What you last asked for, newest first, across every
                            session at once -- timestamp, text, and the line it
-                           lives on.
+                           lives on. --since gates on whether you are around.
+    situation              One board joining title, SendMessage address, live
+                           state, and how long since each was last asked.
     export-session <title> Export one session to .md (filename = title). Also
                            accepts a raw cliSessionId (or unique prefix).
     export-session --all   Export every session matching the filter.
@@ -783,8 +785,58 @@ def session_prompts(session):
     return out
 
 
+DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([smhdw]?)$", re.I)
+DURATION_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800, "": 3600}
+
+
+def parse_duration(text):
+    """'90m', '2h', '1d', '3600' -> seconds. A bare number is hours, because the
+    window this is asked for is almost always an hour."""
+    m = DURATION_RE.match(str(text).strip())
+    if not m:
+        sys.stderr.write(f"unparseable duration {text!r}; use 30s, 90m, 2h, 1d\n")
+        sys.exit(2)
+    return float(m.group(1)) * DURATION_UNITS[m.group(2).lower()]
+
+
+def epoch_of(ts):
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+    except (AttributeError, ValueError):
+        return None
+
+
+def ago(seconds):
+    """Compact age: 44s, 12m, 3h07m, 2d04h."""
+    if seconds is None:
+        return "-"
+    s = int(max(0, seconds))
+    if s < 90:
+        return f"{s}s"
+    if s < 5400:
+        return f"{s // 60}m"
+    if s < 172800:
+        return f"{s // 3600}h{(s % 3600) // 60:02d}m"
+    return f"{s // 86400}d{(s % 86400) // 3600:02d}h"
+
+
+def select_sessions(cwd, exclude):
+    """Titled sessions in cwd, minus any named in --exclude (exact title or a
+    cliSessionId prefix). A routine that reads its own session sees its own
+    prompts as the human's, and finds work it has already done -- excluding
+    itself is what makes an automated caller honest."""
+    drop = set(exclude or [])
+    out = []
+    for s in list_sessions(cwd):
+        cli = s.get("cliSessionId") or ""
+        if s.get("title") in drop or any(cli.startswith(d) for d in drop if d):
+            continue
+        out.append(s)
+    return out
+
+
 def cmd_recent_prompts(args):
-    sessions = list_sessions(args.cwd)
+    sessions = select_sessions(args.cwd, args.exclude)
     if args.session:
         cli_id, label = resolve_target(args.session, args.cwd)
         sessions = ([s for s in sessions if s.get("cliSessionId") == cli_id]
@@ -793,16 +845,23 @@ def cmd_recent_prompts(args):
     for s in sessions:
         if s.get("cliSessionId"):
             prompts.extend(session_prompts(s))
+    if args.since:
+        floor = time.time() - parse_duration(args.since)
+        prompts = [p for p in prompts if (epoch_of(p["when"]) or 0) >= floor]
     prompts.sort(key=lambda p: p["when"] or "", reverse=True)
     if args.limit > 0:
         prompts = prompts[:args.limit]
     if args.json:
         json.dump(prompts, sys.stdout, indent=2)
         sys.stdout.write("\n")
-        return
+        return 0 if prompts else 1
     if not prompts:
-        sys.stderr.write(f"no prompts found in {args.cwd}\n")
-        return
+        # exit 1, not 0: --since makes this a question with a no answer, and a
+        # caller that gates on "did the human say anything" tests the status.
+        sys.stderr.write(
+            f"no prompts in {args.cwd}"
+            + (f" within {args.since}" if args.since else "") + "\n")
+        return 1
     for p in prompts:
         text = p["text"]
         if args.chars and len(text) > args.chars:
@@ -812,6 +871,96 @@ def cmd_recent_prompts(args):
         for ln in text.split("\n"):
             print(f"  | {ln}" if ln else "  |")
         print()
+    return 0
+
+
+# --- situation: one board, because the two namespaces don't share a name -------
+#
+# A session is a title to you, a `name` to SendMessage, and a pid to the process
+# table, and those three disagree: "Clearances" answers to `homesodamachine-b0`.
+# Joining them by name is the mistake waiting to be made, so this joins them by
+# cliSessionId, which all three carry. What comes out is the one view an
+# automated helper needs before it does anything: who is here, how to reach
+# them, whether they are still moving, what they were last asked, and how long
+# ago they stopped.
+
+
+def _peer_idle_module():
+    """peer_idle.py is this file's sibling and owns the WORKING/IDLE/FAILED/GONE
+    reading. Imported rather than reimplemented; absent, the board still prints
+    with the state column blank."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import peer_idle
+        return peer_idle
+    except Exception:
+        return None
+
+
+def situation(cwd, exclude=None):
+    pi = _peer_idle_module()
+    states = {}
+    if pi:
+        for sess in pi.live_sessions(cwd):
+            row = pi.state_of(sess, cwd)
+            if row.get("sessionId"):
+                states[row["sessionId"]] = row
+    peers = peer_addresses()
+    now = time.time()
+    # A live session that was never titled is invisible to list-sessions by
+    # design, but it is still a worker, still reachable, and may be the one
+    # holding something unowned. Fold the unmatched live ids in under their peer
+    # name so the board is every agent in the tree, not every named one.
+    known = {s.get("cliSessionId") for s in list_sessions(cwd)}
+    untitled = [
+        {"cliSessionId": sid, "cwd": cwd, "titleSource": "process",
+         "title": "(" + ((peers.get(sid) or {}).get("name")
+                         or (states.get(sid) or {}).get("name") or sid[:8]) + ")"}
+        for sid in sorted(set(states) | set(peers)) if sid not in known
+    ]
+    rows = []
+    for s in select_sessions(cwd, exclude) + untitled:
+        cli = s.get("cliSessionId")
+        if not cli:
+            continue
+        prompts = session_prompts(s)
+        last = prompts[-1] if prompts else None
+        st = states.get(cli, {})
+        rows.append({
+            "title": s.get("title"),
+            "cliSessionId": cli,
+            "address": (peers.get(cli) or {}).get("name"),
+            "state": st.get("state", "-"),
+            "idle_for": st.get("idle_for") if st.get("state") not in (None, "working") else None,
+            "asked_ago": (now - epoch_of(last["when"])) if last and epoch_of(last["when"]) else None,
+            "prompts": len(prompts),
+            "last_ask": (last or {}).get("text", ""),
+            "tail": st.get("tail", ""),
+        })
+    rows.sort(key=lambda r: (r["asked_ago"] is None, r["asked_ago"] or 0))
+    return rows
+
+
+def cmd_situation(args):
+    rows = situation(args.cwd, args.exclude)
+    if args.json:
+        json.dump(rows, sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0 if rows else 1
+    if not rows:
+        sys.stderr.write(f"no titled sessions in {args.cwd}\n")
+        return 1
+    tw = max(len(r["title"] or "") for r in rows)
+    aw = max(len(r["address"] or "(relay only)") for r in rows)
+    print(f'{"SESSION":<{tw}}  {"ADDRESS":<{aw}}  {"STATE":<8} {"STOPPED":>8} {"ASKED":>8}  LAST')
+    for r in rows:
+        state = {"working": "working", "idle": "STOPPED", "failed": "FAILED",
+                 "gone": "GONE", "unknown": "?"}.get(r["state"], "-")
+        stopped = ago(r["idle_for"]) if r["idle_for"] is not None else "-"
+        gist = " ".join((r["tail"] or r["last_ask"] or "").split())[:70]
+        print(f'{r["title"]:<{tw}}  {(r["address"] or "(relay only)"):<{aw}}  '
+              f'{state:<8} {stopped:>8} {ago(r["asked_ago"]):>8}  {gist}')
+    return 0
 
 
 def cmd_list_chats(args):
@@ -1111,6 +1260,13 @@ examples:
   jsonl2md.py recent-prompts --session "PCB clean"
   jsonl2md.py recent-prompts -n 0 --json      # every prompt, machine-readable
 
+  # Is the human here? Exits 1 when nothing was said in the window, so it gates.
+  jsonl2md.py recent-prompts --since 1h -n 0 --exclude "My Own Session" || exit 0
+
+  # Who is here, how to reach them, and whether they are still moving
+  jsonl2md.py situation
+  jsonl2md.py situation --exclude "My Own Session" --json
+
   # Read every session at once: your turns whole, each agent run cut in the middle
   jsonl2md.py export-session --all --compact --out ./compact
   jsonl2md.py export-session --all --compact 3 --out ./tighter
@@ -1166,7 +1322,7 @@ def main():
     )
     sub = ap.add_subparsers(
         dest="cmd",
-        metavar="{list-codex-sessions,export-codex-session,list-sessions,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
+        metavar="{list-codex-sessions,export-codex-session,list-sessions,situation,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
     )
 
     p_cls = sub.add_parser(
@@ -1217,9 +1373,30 @@ def main():
                       help="truncate each prompt to N characters (default: print in full)")
     p_rp.add_argument("--json", action="store_true",
                       help="emit the records as JSON instead of the readable listing")
+    p_rp.add_argument("--since", default=None, metavar="DUR",
+                      help="only prompts newer than DUR (30s, 90m, 2h, 1d; a bare "
+                           "number is hours). Exits 1 when the window is empty, so a "
+                           "caller can gate on whether the human is around")
+    p_rp.add_argument("--exclude", action="append", default=[], metavar="SESSION",
+                      help="leave a session out by title or cliSessionId prefix; "
+                           "repeatable. An automated caller passes its own")
     p_rp.add_argument("--cwd", default=DEFAULT_CWD,
                       help=f"project path to filter by (default: {DEFAULT_CWD})")
     p_rp.set_defaults(func=cmd_recent_prompts)
+
+    p_sit = sub.add_parser(
+        "situation",
+        help="one board: every session, how to reach it, whether it is still moving",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_sit.add_argument("--exclude", action="append", default=[], metavar="SESSION",
+                       help="leave a session out by title or cliSessionId prefix; repeatable")
+    p_sit.add_argument("--json", action="store_true",
+                       help="emit the rows as JSON, each with its full last prompt")
+    p_sit.add_argument("--cwd", default=DEFAULT_CWD,
+                       help=f"project path to filter by (default: {DEFAULT_CWD})")
+    p_sit.set_defaults(func=cmd_situation)
 
     p_es = sub.add_parser(
         "export-session",
