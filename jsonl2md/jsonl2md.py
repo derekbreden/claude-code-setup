@@ -3,9 +3,9 @@
 
 Three sources, each with a list verb and an export verb, plus a standalone renderer:
 
-  Claude Code sessions (a project on disk):
-    list-sessions          List titled desktop sessions + VSCode-extension
-                           sessions in --cwd.
+  Claude Code sessions (a project on disk, or on Anthropic's machines):
+    list-sessions          List titled desktop sessions, VSCode-extension
+                           sessions, and cloud sessions for --cwd.
     recent-prompts         What you last asked for, newest first, across every
                            session at once -- timestamp, text, and the line it
                            lives on. --since gates on whether you are around.
@@ -69,6 +69,25 @@ COOKIE_DB = os.path.join(CLAUDE_APP_DIR, "Cookies")
 KEYCHAIN_SERVICE = "Claude Safe Storage"
 KEYCHAIN_ACCOUNT = "Claude Key"
 CODEX_HOME = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
+
+# --- cloud sessions ---------------------------------------------------------
+#
+# A session started in the Code section of the desktop app can run on Anthropic's
+# machines instead of this one. It has a title you gave it and a transcript you
+# can read, and neither is on this disk: the only local trace is its id in
+# `remote-session-spaces.json`. So it is reachable exactly one way, through the
+# same API the CLI uses, with the same OAuth grant the CLI signed in with.
+CLOUD_API = "https://api.anthropic.com"
+CLOUD_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+CLOUD_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CC_KEYCHAIN_SERVICE = "Claude Code-credentials"
+CC_CREDENTIALS_FILE = os.path.expanduser("~/.claude/.credentials.json")
+CLOUD_UA = "claude-cli/2.1.246 (external, cli)"
+CLOUD_CACHE_ROOT = os.path.expanduser("~/.jsonl2md/cloud")
+CLOUD_LIST_TTL = 60
+# Cloud ids carry their own prefix, so the id alone says which side a session
+# lives on -- that is the discriminator every read path branches on.
+CLOUD_ID_RE = re.compile(r"^cse_[A-Za-z0-9]+$")
 
 
 def _latest_codex_db(stem):
@@ -464,6 +483,8 @@ def resolve_target(positional, cwd):
         sys.exit(1)
     if UUID_RE.match(positional) and os.path.exists(jsonl_path_for(positional, cwd)):
         return positional, positional
+    if is_cloud(positional):
+        return positional, positional
     sys.stderr.write(f"No user-titled session {positional!r} in {cwd}, and not a known cliSessionId.\n")
     sys.stderr.write("Run 'jsonl2md.py list-sessions' to see titles, or pass a cliSessionId.\n")
     sys.exit(1)
@@ -614,6 +635,295 @@ def list_vscode_sessions(target_cwd):
     return out
 
 
+class TranscriptError(Exception):
+    """A transcript that could not be read -- a missing file, or a cloud read the
+    network could not answer. Listing swallows it: an unreachable server must not
+    hide the sessions that ARE on this disk. Export and delta let it out, because
+    you named one session, and a silent empty transcript would read as 'nothing
+    was said'."""
+
+
+def _cc_credential_store():
+    """Where Claude Code keeps its OAuth grant, as (kind, handle).
+
+    The Keychain item is addressed by service AND account, and the account is
+    your login name, not the service string. Writing to the wrong account makes
+    a second item that `security` will never hand back -- so the account is read
+    off the existing item rather than assumed."""
+    out = subprocess.run(["security", "find-generic-password", "-s", CC_KEYCHAIN_SERVICE],
+                         capture_output=True, text=True)
+    if out.returncode == 0:
+        acct = re.search(r'"acct"<blob>="([^"]*)"', out.stdout)
+        if acct:
+            return "keychain", acct.group(1)
+    if os.path.exists(CC_CREDENTIALS_FILE):
+        return "file", CC_CREDENTIALS_FILE
+    raise TranscriptError(
+        "no Claude Code OAuth grant found (Keychain item %r, or %s). "
+        "Run `claude` once to sign in." % (CC_KEYCHAIN_SERVICE, CC_CREDENTIALS_FILE))
+
+
+def _cc_credentials_read(kind, handle):
+    if kind == "file":
+        return json.load(open(handle))
+    raw = subprocess.run(
+        ["security", "find-generic-password", "-s", CC_KEYCHAIN_SERVICE, "-a", handle, "-w"],
+        capture_output=True, text=True, check=True).stdout
+    return json.loads(raw)
+
+
+def _cc_credentials_write(kind, handle, cred):
+    """Persist a refreshed grant. The refresh token rotates on every use, so the
+    new one has to land where the CLI will look for it -- keeping the old one
+    would leave the CLI holding a token the server has already retired."""
+    if kind == "file":
+        tmp = handle + ".tmp"
+        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+            json.dump(cred, f)
+        os.replace(tmp, handle)
+        return
+    subprocess.run(["security", "add-generic-password", "-U",
+                    "-s", CC_KEYCHAIN_SERVICE, "-a", handle, "-w", json.dumps(cred)],
+                   check=True, capture_output=True)
+
+
+def _cloud_token():
+    """A live access token, refreshing the stored grant when it has aged out.
+
+    Tokens last eight hours and a tree of sessions runs for days, so expiry is
+    the normal case, not the error case."""
+    kind, handle = _cc_credential_store()
+    cred = _cc_credentials_read(kind, handle)
+    oauth = cred.get("claudeAiOauth") or {}
+    if not oauth.get("accessToken"):
+        raise TranscriptError("stored Claude Code grant has no access token; run `claude` to sign in.")
+    if oauth.get("expiresAt", 0) > (time.time() + 60) * 1000:
+        return oauth["accessToken"]
+    if not oauth.get("refreshToken"):
+        raise TranscriptError("Claude Code access token expired and no refresh token is stored.")
+    body = json.dumps({"grant_type": "refresh_token",
+                       "refresh_token": oauth["refreshToken"],
+                       "client_id": CLOUD_CLIENT_ID}).encode()
+    req = Request(CLOUD_TOKEN_URL, data=body,
+                  headers={"Content-Type": "application/json", "User-Agent": CLOUD_UA})
+    try:
+        with urlopen(req, timeout=30) as resp:
+            tok = json.loads(resp.read())
+    except Exception as exc:
+        raise TranscriptError(f"OAuth refresh failed: {exc}")
+    oauth["accessToken"] = tok["access_token"]
+    if tok.get("refresh_token"):
+        oauth["refreshToken"] = tok["refresh_token"]
+    if tok.get("expires_in"):
+        oauth["expiresAt"] = int(time.time() * 1000) + int(tok["expires_in"]) * 1000
+    if tok.get("scope"):
+        oauth["scopes"] = tok["scope"].split()
+    cred["claudeAiOauth"] = oauth
+    _cc_credentials_write(kind, handle, cred)
+    return oauth["accessToken"]
+
+
+def _cloud_get(path):
+    req = Request(CLOUD_API + path, headers={
+        "Authorization": f"Bearer {_cloud_token()}",
+        "anthropic-version": "2023-06-01",
+        "Accept": "application/json",
+        "User-Agent": CLOUD_UA,
+    })
+    try:
+        with urlopen(req, timeout=60) as resp:
+            return json.loads(resp.read())
+    except TranscriptError:
+        raise
+    except Exception as exc:
+        raise TranscriptError(f"GET {path}: {exc}")
+
+
+def project_repo(cwd):
+    """`owner/name` of the checkout at cwd, which is the only thing a cloud
+    session and a local directory have in common: the cloud worker has no cwd,
+    it has the repository it was pointed at."""
+    out = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
+                         capture_output=True, text=True)
+    if out.returncode != 0:
+        return None
+    url = out.stdout.strip()
+    m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", url)
+    return m.group(1) if m else None
+
+
+def _cloud_session_repos(session):
+    cfg = session.get("config") or {}
+    repos = set()
+    for src in cfg.get("sources") or []:
+        m = re.search(r"[:/]([^/:]+/[^/]+?)(?:\.git)?$", src.get("url") or "")
+        if m:
+            repos.add(m.group(1))
+    for out in cfg.get("outcomes") or []:
+        repo = (out.get("git_info") or {}).get("repo")
+        if repo:
+            repos.add(repo)
+    return repos
+
+
+def _cloud_cache(name):
+    os.makedirs(CLOUD_CACHE_ROOT, exist_ok=True)
+    return os.path.join(CLOUD_CACHE_ROOT, name)
+
+
+def cloud_sessions(force=False):
+    """Every cloud session on the account, freshest first, cached for a minute.
+
+    The cache is what lets `list-sessions` and `situation` stay as fast as they
+    were when every session was a file: one request per minute, and a stale copy
+    is served rather than nothing when the network is gone."""
+    cache = _cloud_cache("sessions.json")
+    if not force:
+        try:
+            age = time.time() - os.path.getmtime(cache)
+            if age < CLOUD_LIST_TTL:
+                return json.load(open(cache))
+        except (OSError, ValueError):
+            pass
+    try:
+        data = _cloud_get("/v1/code/sessions?limit=200").get("data", [])
+    except TranscriptError:
+        try:
+            return json.load(open(cache))
+        except (OSError, ValueError):
+            raise
+    tmp = cache + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(data, f)
+    os.replace(tmp, cache)
+    return data
+
+
+def list_cloud_sessions(target_cwd):
+    """Cloud sessions for this project, shaped like a desktop session so every
+    verb downstream treats them identically.
+
+    Only `anthropic_cloud` ones. A cloud record also exists for each session
+    running HERE -- environment_kind `bridge` -- and that one is already listed
+    from its own metadata and its own transcript; listing it again from the API
+    would double every session in the tree under a second id."""
+    if os.environ.get("JSONL2MD_NO_CLOUD"):
+        return []
+    repo = project_repo(target_cwd)
+    if not repo:
+        return []
+    try:
+        sessions = cloud_sessions()
+    except (TranscriptError, OSError, ValueError):
+        return []
+    out = []
+    for s in sessions:
+        if s.get("environment_kind") != "anthropic_cloud" or s.get("status") == "archived":
+            continue
+        if repo not in _cloud_session_repos(s):
+            continue
+        out.append({
+            "cliSessionId": s["id"],
+            "cwd": target_cwd,
+            "title": s.get("title") or f"Cloud - {s['id'][4:12]}",
+            "titleSource": "cloud",
+            "isArchived": False,
+            "lastActivityAt": int((epoch_of(s.get("last_event_at")
+                                             or s.get("created_at")) or 0) * 1000),
+            "cloudLastEventAt": s.get("last_event_at"),
+        })
+    return out
+
+
+def cloud_events(cse_id, after=None):
+    """Raw events, oldest first, from `after` (a sequence number) onward.
+
+    The stream is the session's whole protocol -- control traffic, worker logs,
+    tool progress -- and the two types that carry what was said are the ones
+    named for who said it."""
+    events, cursor = [], after
+    while True:
+        q = f"/v1/code/sessions/{cse_id}/events?limit=200&sort_order=asc"
+        if cursor is not None:
+            q += f"&cursor={cursor}"
+        page = _cloud_get(q)
+        batch = page.get("data") or []
+        events.extend(batch)
+        cursor = page.get("next_cursor")
+        if not batch or cursor is None:
+            return events
+
+
+def cloud_to_records(events):
+    """Cloud event payloads are Claude Code transcript records already -- same
+    `message`, same roles, same uuids. The one thing that differs is spelling:
+    the flags marking a user record as machine-written come back snake_cased,
+    and `user_speech` reads them camelCased."""
+    alias = {"tool_use_result": "toolUseResult", "is_sidechain": "isSidechain",
+             "is_meta": "isMeta", "parent_tool_use_id": "parentToolUseId"}
+    out = []
+    for e in events:
+        if e.get("event_type") not in ("user", "assistant"):
+            continue
+        rec = dict(e.get("payload") or {})
+        for snake, camel in alias.items():
+            if snake in rec and camel not in rec:
+                rec[camel] = rec.pop(snake)
+        out.append(rec)
+    return out
+
+
+def cloud_records(cse_id, last_event_at=None):
+    """A cloud session's transcript as records, cached against re-download.
+
+    The session's own `last_event_at` is the cache key -- a transcript that has
+    not gained an event cannot have changed, so there is no interval to guess
+    at and no staleness to age out."""
+    cache = _cloud_cache(f"{cse_id}.json")
+    if last_event_at:
+        try:
+            blob = json.load(open(cache))
+            if blob.get("last_event_at") == last_event_at:
+                return blob["records"]
+        except (OSError, ValueError, KeyError):
+            pass
+    records = cloud_to_records(cloud_events(cse_id))
+    if last_event_at:
+        tmp = cache + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({"last_event_at": last_event_at, "records": records}, f)
+        os.replace(tmp, cache)
+    return records
+
+
+def is_cloud(cli_id):
+    return bool(cli_id and CLOUD_ID_RE.match(cli_id))
+
+
+def session_for(cli_id, cwd):
+    """The listed session record for an id, or a bare stand-in for one that is
+    not listed (a raw id for an untitled or archived session). Carrying the
+    record rather than the id alone is what lets a cloud read reuse its cache:
+    the cache key is the session's `last_event_at`, which only the record has."""
+    for s in list_sessions(cwd):
+        if s.get("cliSessionId") == cli_id:
+            return s
+    return {"cliSessionId": cli_id, "cwd": cwd, "title": cli_id}
+
+
+def records_of(session):
+    """Every read verb wants the same thing from a session -- its records --
+    and only this function knows whether that means opening a file or asking
+    the API for one."""
+    cli_id = session.get("cliSessionId")
+    if is_cloud(cli_id):
+        return cloud_records(cli_id, session.get("cloudLastEventAt"))
+    path = jsonl_path_for(cli_id, session["cwd"])
+    if not os.path.exists(path):
+        raise TranscriptError(f"missing transcript: {path}")
+    return list(iter_records_safe(open(path, errors="replace").read()))
+
+
 def list_sessions(target_cwd):
     out = []
     for p in glob.glob(f"{META_ROOT}/*/*/local_*.json"):
@@ -632,6 +942,10 @@ def list_sessions(target_cwd):
     # they list and export too, deduped against any desktop entry for the same id.
     seen = {m.get("cliSessionId") for m in out}
     out.extend(s for s in list_vscode_sessions(target_cwd) if s["cliSessionId"] not in seen)
+    # Sessions running on Anthropic's machines are in this project too. They have
+    # no metadata file and no transcript here, so the API is the only place they
+    # can come from, and without this they are invisible to every verb.
+    out.extend(list_cloud_sessions(target_cwd))
     out.sort(key=lambda m: m.get("lastActivityAt", 0), reverse=True)
     return out
 
@@ -717,6 +1031,8 @@ def cmd_list_sessions(args):
         peer = peers.get(s["cliSessionId"])
         if peer:
             print(f'{s["title"]:<{width}}  → SendMessage to: {peer["name"]}')
+        elif is_cloud(s.get("cliSessionId")):
+            print(f'{s["title"]:<{width}}  → cloud session (read-only here)')
         else:
             print(f'{s["title"]:<{width}}  → relay only (no peer channel)')
 
@@ -761,14 +1077,26 @@ def local_time(ts):
 
 def session_prompts(session):
     """Every human turn in one session, oldest first, each with its timestamp
-    and its location. A session whose transcript is gone contributes none."""
-    path = jsonl_path_for(session["cliSessionId"], session["cwd"])
-    try:
-        text = open(path, errors="replace").read()
-    except OSError:
-        return []
+    and its location. A session whose transcript is gone contributes none.
+
+    A cloud session's transcript has no line to point at, so its prompts carry
+    the cache file they were read out of and their index within it."""
+    if is_cloud(session.get("cliSessionId")):
+        try:
+            records = cloud_records(session["cliSessionId"], session.get("cloudLastEventAt"))
+        except (TranscriptError, OSError, ValueError):
+            return []
+        located = [(obj, i + 1) for i, obj in enumerate(records)]
+        path = _cloud_cache(f"{session['cliSessionId']}.json")
+    else:
+        path = jsonl_path_for(session["cliSessionId"], session["cwd"])
+        try:
+            text = open(path, errors="replace").read()
+        except OSError:
+            return []
+        located = iter_located(text)
     out = []
-    for obj, line in iter_located(text):
+    for obj, line in located:
         if obj.get("type") != "user":
             continue
         role, said = extract_message(obj)
@@ -929,6 +1257,7 @@ def situation(cwd, exclude=None):
         rows.append({
             "title": s.get("title"),
             "cliSessionId": cli,
+            "cloud": is_cloud(cli),
             "address": (peers.get(cli) or {}).get("name"),
             "state": st.get("state", "-"),
             "idle_for": st.get("idle_for") if st.get("state") not in (None, "working") else None,
@@ -950,15 +1279,18 @@ def cmd_situation(args):
     if not rows:
         sys.stderr.write(f"no titled sessions in {args.cwd}\n")
         return 1
+    def address_of(row):
+        return row["address"] or ("(cloud)" if row["cloud"] else "(relay only)")
+
     tw = max(len(r["title"] or "") for r in rows)
-    aw = max(len(r["address"] or "(relay only)") for r in rows)
+    aw = max(len(address_of(r)) for r in rows)
     print(f'{"SESSION":<{tw}}  {"ADDRESS":<{aw}}  {"STATE":<8} {"STOPPED":>8} {"ASKED":>8}  LAST')
     for r in rows:
         state = {"working": "working", "idle": "STOPPED", "failed": "FAILED",
                  "gone": "GONE", "unknown": "?"}.get(r["state"], "-")
         stopped = ago(r["idle_for"]) if r["idle_for"] is not None else "-"
         gist = " ".join((r["tail"] or r["last_ask"] or "").split())[:70]
-        print(f'{r["title"]:<{tw}}  {(r["address"] or "(relay only)"):<{aw}}  '
+        print(f'{r["title"]:<{tw}}  {address_of(r):<{aw}}  '
               f'{state:<8} {stopped:>8} {ago(r["asked_ago"]):>8}  {gist}')
     return 0
 
@@ -995,11 +1327,12 @@ def cmd_export_session(args):
         if not cli_id:
             print(f"missing cliSessionId in metadata: {s.get('title')!r}", file=sys.stderr)
             continue
-        jsonl = jsonl_path_for(cli_id, s["cwd"])
-        if not os.path.exists(jsonl):
-            print(f"missing transcript: {jsonl}", file=sys.stderr)
+        try:
+            records = records_of(s)
+        except TranscriptError as exc:
+            print(exc, file=sys.stderr)
             continue
-        md = render_md(iter_records(open(jsonl).read()), args.compact)
+        md = render_md(records, args.compact)
         base = safe_name(s["title"])
         md_path = os.path.join(args.out, base + ".md")
         with open(md_path, "w") as f:
@@ -1042,11 +1375,11 @@ def cmd_render(args):
 
 def cmd_delta(args):
     cli_id, label = resolve_target(args.title, args.cwd)
-    jsonl = jsonl_path_for(cli_id, args.cwd)
-    if not os.path.exists(jsonl):
-        sys.stderr.write(f"missing transcript: {jsonl}\n")
+    try:
+        records = records_of(session_for(cli_id, args.cwd))
+    except TranscriptError as exc:
+        sys.stderr.write(f"{exc}\n")
         sys.exit(1)
-    records = list(iter_records_safe(open(jsonl).read()))
     total = len(records)
     file_last = last_uuid(records)
 
@@ -1090,8 +1423,41 @@ def cmd_delta(args):
             f"jsonl2md.py delta {args.title!r} --commit\n")
 
 
+def cloud_head_sequence(cse_id):
+    """The newest event's sequence number, in one request. This is where a watch
+    starts: a cloud watch streams what is said from now on, and finding 'now'
+    must not mean downloading the whole session to look at its last line."""
+    page = _cloud_get(f"/v1/code/sessions/{cse_id}/events?limit=1&sort_order=desc")
+    data = page.get("data") or []
+    return data[0].get("sequence_num") if data else None
+
+
+def watch_cloud(cse_id, label, interval):
+    """Tail a cloud session. The local watch polls a file's size because that is
+    what changes when a session speaks; here the sequence number is that same
+    signal, and asking for events after it returns the new turns and nothing
+    else -- so the poll costs one small request whether or not anything was said."""
+    cursor = cloud_head_sequence(cse_id)
+    sys.stderr.write(f"[watch] {label}: cloud session, streaming NEW turns from now. Ctrl-C to stop.\n")
+    try:
+        while True:
+            events = cloud_events(cse_id, after=cursor)
+            if events:
+                cursor = events[-1].get("sequence_num")
+                md = render_md(cloud_to_records(events))
+                if md.strip():
+                    sys.stdout.write(md + ("\n" if not md.endswith("\n") else ""))
+                    sys.stdout.flush()
+            time.sleep(interval)
+    except KeyboardInterrupt:
+        sys.stderr.write(f"\n[watch] {label}: stopped.\n")
+    return 0
+
+
 def cmd_watch(args):
     cli_id, label = resolve_target(args.title, args.cwd)
+    if is_cloud(cli_id):
+        return watch_cloud(cli_id, label, args.interval)
     jsonl = jsonl_path_for(cli_id, args.cwd)
     if not os.path.exists(jsonl):
         sys.stderr.write(f"missing transcript: {jsonl}\n")
@@ -1199,6 +1565,16 @@ def cmd_await_reply(args):
 
 def cmd_send(args):
     cli_id, label = resolve_target(args.title, args.cwd)
+    if is_cloud(cli_id):
+        sys.stderr.write(
+            f"[relay] {label} runs on Anthropic's machines, not this one. The relay\n"
+            f"[relay] mailbox is a directory under this HOME that a session picks up on\n"
+            f"[relay] its next tool call -- a cloud worker never sees it, so a message\n"
+            f"[relay] left there would sit unread forever. Nothing was sent.\n"
+            f"[relay] Type into it in the Code section of the desktop app instead;\n"
+            f"[relay] reading it from here (list/export/delta/watch) works as usual.\n"
+        )
+        return 1
     peer = peer_addresses().get(cli_id)
     if peer and not args.force_relay:
         sys.stderr.write(

@@ -31,7 +31,11 @@ so it works in bypass mode where `send_message` cannot.
 
 ## Under the hood
 
-All local, no network, no cross-session messaging:
+No cross-session messaging. A session running on this machine is a file on this disk, and
+reading it costs nothing; a session running on Anthropic's machines — one started in the
+Code section of the desktop app — has its title and its transcript only on the server, so
+that one is fetched, with the OAuth grant `claude` already signed in with. Either way the
+verbs are the same:
 
 - `jsonl2md.py list-sessions` — resolve the title (lists your user-titled sessions),
 - `jsonl2md.py export-session "<title>" --out /tmp` — render the clean transcript
@@ -57,6 +61,12 @@ to open or close; running the command *is* the act of routing.
   shows. (For others, pass a `cliSessionId`, or render by transcript path.)
 - It's a **snapshot at pull time**; re-run `/relay` (or `delta`) to refresh.
 - **One direction per pull** — you route by choosing where you run it.
+- A **cloud session is read-only from here**. `send` refuses it: the relay mailbox is a
+  directory under this HOME that a session picks up on its next tool call, and a worker on
+  someone else's machine never looks in it. Type into that one in the desktop app.
+- Cloud sessions are matched to a project by **git remote**, since a cloud worker has no
+  working directory — two checkouts of one repo see the same cloud sessions.
+- `JSONL2MD_NO_CLOUD=1` skips the cloud entirely, for a caller that wants no network.
 
 ## The command
 

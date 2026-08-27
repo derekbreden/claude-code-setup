@@ -31,7 +31,7 @@ Three sources, each with a list verb and an export verb, plus a standalone rende
 
 | Source | List | Export |
 | --- | --- | --- |
-| Claude Code sessions (current project) | `list-sessions` | `export-session "<title>"` |
+| Claude Code sessions (current project, local and cloud) | `list-sessions` | `export-session "<title>"` |
 | Claude.ai chats (desktop app sidebar)  | `list-chats`    | `export-chat "<name>"` |
 | Codex desktop tasks (current project) | `list-codex-sessions` | `export-codex-session "<title>"` |
 
@@ -209,6 +209,30 @@ cat session.jsonl | ./jsonl2md.py render > out.md
 - Metadata is read from `~/Library/Application Support/Claude/claude-code-sessions/<workspace>/<device>/local_*.json`. Each metadata file has `cliSessionId`, `cwd`, `title`, `titleSource`, `isArchived`, `lastActivityAt`. The filter is `cwd == --cwd` AND `isArchived == false` AND `titleSource == "user"`.
 - Transcripts are at `~/.claude/projects/<cwd-with-/-replaced-by-->/<cliSessionId>.jsonl`.
 
+**Cloud sessions:**
+
+A session started in the Code section of the desktop app can run on Anthropic's machines. It
+has a title you gave it and a transcript you can read, and neither is on this disk — the only
+local trace is its id in `remote-session-spaces.json`. So it is read the way the CLI reads it:
+
+- `GET https://api.anthropic.com/v1/code/sessions` for the list, `…/events` for the transcript.
+  Event payloads are Claude Code transcript records already, so they render through the same
+  path as a `.jsonl`; only the flags marking a record as machine-written differ in spelling.
+- Auth is the OAuth grant `claude` signed in with, read from the Keychain item
+  `Claude Code-credentials` (or `~/.claude/.credentials.json`) and refreshed when it has aged
+  out. The refresh token rotates on use, so the new grant is written back where the CLI looks.
+- A cloud worker has no working directory, so a cloud session is matched to a project by **git
+  remote** — two checkouts of one repo see the same cloud sessions.
+- Only `environment_kind == "anthropic_cloud"` is listed. A cloud record also exists for each
+  session running *here* (`bridge`), and that one is already listed from its own metadata and
+  its own transcript.
+- The list is cached for a minute under `~/.jsonl2md/cloud/`, and a transcript is cached
+  against the session's `last_event_at` — a session that has not gained an event cannot have
+  changed. When the network is gone the stale copy is served, so the sessions that *are* on
+  this disk still list. `JSONL2MD_NO_CLOUD=1` skips the cloud entirely.
+- Reading is the whole of it: `send` refuses a cloud target, because the relay mailbox is a
+  directory under this HOME that a worker on another machine never looks in.
+
 **Claude.ai chats:**
 
 - The script reads encrypted cookies from `~/Library/Application Support/Claude/Cookies` and decrypts them with the AES key stored in your macOS Keychain under `Claude Safe Storage` / `Claude Key`. The first run prompts for keychain access — pick **Always Allow** if you want it silent thereafter.
@@ -239,7 +263,8 @@ This list exists because each item is a thing somebody might reasonably want dif
 - **`list-chats` and `export-chat --all` are bounded by `--limit`** (default 30). The Claude.ai API supports paging; I have never needed it. Bump the limit if you need older chats.
 - **Tool calls, tool results, thinking blocks, system messages, attachments, and files are unconditionally stripped.** There is no flag to include them. The whole reason the tool exists is to produce a transcript of just the spoken text. That includes the things the harness posts under *your* name — task notifications, peer-session messages, command bodies, local command output — which are system messages wearing a user record.
 - **Output filenames are the session/chat title verbatim**, with `/`, `\`, and `:` replaced by `_`. Filename collisions silently overwrite.
-- **macOS only.** The cookie decryption format, keychain service name, and filesystem paths are all macOS-specific. A Linux/Windows port would need new code in three places.
+- **macOS only.** The cookie decryption format, keychain service names, and filesystem paths are all macOS-specific. A Linux/Windows port would need new code in three places.
+- **Cloud reads cost a network round trip**, and the OAuth refresh writes back to your Keychain. Both are what the CLI itself does; `JSONL2MD_NO_CLOUD=1` opts out of the whole path.
 - **No license file.** Treat it as a reference implementation; copy what's useful.
 
 ## Samples
