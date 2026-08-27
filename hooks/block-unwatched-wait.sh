@@ -80,9 +80,11 @@ if [[ -z "$last_text" ]]; then
 fi
 
 # Strip code spans. A hook's own documentation, or a script that greps for these
-# phrases, is not an agent claiming to wait.
+# phrases, is not an agent claiming to wait. Emphasis markers go too: bolding half a
+# word puts a boundary inside it, and un**tracked wait**s would clear the \b anchors
+# below. Removing characters only joins tokens, so it cannot invent a phrase match.
 stripped=$(printf '%s' "$last_text" \
-  | perl -0pe 's/```.*?```//gs; s/`[^`\n]+`//g' 2>/dev/null || printf '%s' "$last_text")
+  | perl -0pe 's/```.*?```//gs; s/`[^`\n]+`//g; s/[*_]//g' 2>/dev/null || printf '%s' "$last_text")
 [[ -n "$stripped" ]] && last_text="$stripped"
 
 # A wait on a person ends the turn correctly — the user's next message wakes the
