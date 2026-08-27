@@ -78,6 +78,13 @@ and doc polish nobody asked for is churn in a tree eight sessions are writing to
 
 ## 4. Act
 
+**Re-read the board first.** `situation` again, immediately before you do anything. This fleet
+moves in minutes: between step 2 and here, a session can finish the thing you were about to
+take, a new one can open on the part you were about to touch, and the fact you were about to
+deliver can go false. An hour is the interval you run on, not the shelf life of what you read.
+If the board moved, re-rank before acting — the candidate that was top ten minutes ago is
+routinely closed by now.
+
 **Taking work over.** First confirm the owner is really gone: `situation` says `STOPPED` or
 `GONE`, and `git status` shows nobody mid-edit in those files. If a session is `working`, its
 files are its own — `calibration/Traffic.md` is about not halting for peers, not about
