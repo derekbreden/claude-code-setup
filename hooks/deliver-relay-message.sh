@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Deliver relay messages queued for this session — the receive half of
-# `jsonl2md.py send`. A second session (an agent acting for the user, watching
-# this one) drops a message file into ~/.claude/hooks/relay-inbox/<sessionId>/;
+# `jsonl2md.py send`. Another agent acting for the user — a Claude Code session,
+# or a Codex task reaching across runtimes with the same script — drops a message
+# file into ~/.claude/hooks/relay-inbox/<sessionId>/;
 # this PreToolUse hook (matcher "*") drains that mailbox on the target's next
 # tool call and injects the message, then removes it.
 #
@@ -72,7 +73,7 @@ rm -f "${files[@]}" 2>/dev/null || true
 
 [[ -n "$body" ]] || exit 0
 
-header="📬 RELAYED MESSAGE — the user injected this into your session out-of-band, from a second Claude Code session watching your work. It is a direct interjection from the user; give it the same weight as anything the user types. Read it, then adjust course before continuing:"
+header="📬 RELAYED MESSAGE — the user injected this into your session out-of-band, from another agent working the same tree. It may be a Claude Code session or a Codex task; the sender label below says which. It is a direct interjection from the user; give it the same weight as anything the user types. Read it, then adjust course before continuing:"
 message="${header}"$'\n\n'"${body}"
 if [[ -n "$replies" ]]; then
   message+=$'\n'"↩︎ THIS MESSAGE CARRIES A RETURN ADDRESS. The sender is parked on \`await-reply\` and nothing else will release it — an idle session cannot be woken, so silence blocks it until its timeout expires. If the message asks you anything, or your answer would change what it does, send one back:"$'\n'"${replies}"
