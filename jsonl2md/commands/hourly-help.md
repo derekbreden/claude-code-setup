@@ -1,5 +1,5 @@
 ---
-description: Hourly. If the human has spoken in the last hour, read the whole fleet at once and do one useful thing for it. Output goes to agents, never to the human.
+description: Hourly. If the human has spoken in the last hour, read the whole fleet at once and land everything it left unowned — routing work to agents rather than back through him.
 argument-hint: [dry-run]
 disable-model-invocation: true
 ---
