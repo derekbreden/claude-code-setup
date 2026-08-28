@@ -69,6 +69,11 @@ One verb, both runtimes — it resolves the title on `board` and picks the trans
   session's next tool call;
 - a **Codex task** gets the message through `codex queue`, delivered as a follow-up turn.
 
+Some Claude sessions are also on Claude's own in-band peer channel, and `send` tells a *Claude*
+caller to use that instead. It does not tell you that: you have no `SendMessage` tool, so for
+you the mailbox is the only way in and `send` routes there automatically. If you ever do see
+that refusal, `--force-relay` overrides it.
+
 A title that exists in **both** runtimes is refused rather than guessed; pass `--kind claude` or
 `--kind codex` to say which.
 

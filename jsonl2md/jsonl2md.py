@@ -1987,6 +1987,20 @@ def _label_for_id(cli_id, cwd):
     return None
 
 
+def caller_has_peer_channel():
+    """Whether the CALLER could use `SendMessage` instead of the file mailbox.
+
+    The peer-channel refusal below exists to stop a Claude agent from taking the
+    slow path when a fast in-band one exists. That reasoning does not survive the
+    move to two runtimes: a Codex task has no `SendMessage` tool, so for it the
+    mailbox is not the slow path, it is the only path -- and being told to use a
+    tool it does not have is a dead end. Claude Code exports `CLAUDECODE` into
+    every shell it runs, so its absence identifies a caller the refusal must not
+    fire for.
+    """
+    return bool(os.environ.get("CLAUDECODE"))
+
+
 def _send_codex(args, target):
     """Deliver into a Codex task through `codex queue`."""
     if args.mode == "nudge":
@@ -2046,6 +2060,13 @@ def cmd_send(args):
         )
         return 1
     peer = peer_addresses().get(cli_id)
+    if peer and not args.force_relay and not caller_has_peer_channel():
+        sys.stderr.write(
+            f"[relay] {label} is on the native peer channel, but you are not a Claude Code\n"
+            f"[relay] session and have no SendMessage tool, so the file mailbox is the way in.\n"
+            f"[relay] Using it. The message lands on that session's next tool call.\n"
+        )
+        peer = None
     if peer and not args.force_relay:
         sys.stderr.write(
             f"[relay] {label} IS ON THE NATIVE PEER CHANNEL. Use that instead:\n"
@@ -2058,6 +2079,8 @@ def cmd_send(args):
             f"[relay]\n"
             f"[relay] `ListAgents` lists it as `{peer['name']}`. Nothing was sent.\n"
             f"[relay] If you meant the file mailbox anyway, re-run with --force-relay.\n"
+            f"[relay] (This refusal fires only because CLAUDECODE is set, i.e. you are a\n"
+            f"[relay] Claude Code session. A Codex caller is routed to the mailbox instead.)\n"
         )
         return 1
     box = os.path.join(RELAY_INBOX_ROOT, cli_id)
@@ -2358,7 +2381,9 @@ def main():
                              "(default: resolve across both and fail loud on a collision)")
     p_send.add_argument("--force-relay", action="store_true",
                         help="use the file mailbox even when the target is on the native peer "
-                             "channel (default: refuse, and print the SendMessage call to use)")
+                             "channel (default: refuse and print the SendMessage call to use, "
+                             "but only for a Claude Code caller -- a caller without that tool "
+                             "is routed to the mailbox automatically)")
     p_send.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
     p_send.set_defaults(func=cmd_send)
 
