@@ -51,6 +51,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -104,6 +105,24 @@ def _latest_codex_db(stem):
 
 CODEX_STATE_DB = _latest_codex_db("state")
 CODEX_HISTORY_DB = _latest_codex_db("thread_history")
+
+# The Codex CLI ships inside the desktop app. `codex queue` is the only
+# sanctioned way to put a message into a running Codex thread, so it is the
+# write half of this file's Codex support -- the read half being the two
+# sqlite projections above. `CODEX_CLI` overrides the search for a fork.
+CODEX_CLI_CANDIDATES = (
+    os.environ.get("CODEX_CLI") or "",
+    "/Applications/ChatGPT.app/Contents/Resources/codex",
+    os.path.expanduser("~/.codex/bin/codex"),
+)
+
+
+def codex_cli():
+    """The codex binary, or None. Bundled path first, then $PATH."""
+    for path in CODEX_CLI_CANDIDATES:
+        if path and os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return shutil.which("codex")
 
 
 def iter_records(text):
@@ -252,7 +271,7 @@ def list_codex_sessions(target_cwd):
     with _sqlite_readonly(CODEX_STATE_DB) as db:
         rows = db.execute(
             """
-            SELECT id, name AS title, recency_at_ms, history_mode
+            SELECT id, name AS title, recency_at_ms, history_mode, rollout_path
               FROM threads
              WHERE cwd = ?
                AND archived = 0
@@ -293,14 +312,145 @@ def resolve_codex_target(positional, cwd):
     sys.exit(1)
 
 
-def codex_dialogue(thread_id):
+# A live thread's sqlite projection lags the conversation badly -- a task an hour
+# into its work can project four turns. The rollout JSONL beside it is the source
+# of truth and is written as the turn happens, so it is what a reader wanting to
+# know what another agent is doing RIGHT NOW has to read. The projection stays as
+# the fallback for threads migrated before rollouts were kept.
+
+# Everything the Codex harness posts under the user's name: peer-task envelopes,
+# the environment block, the plugin advert, and the body of an invoked skill --
+# the counterparts of the slash-command bodies and system reminders the Claude
+# renderer drops. The line the user actually typed to invoke a skill is a normal
+# user turn and survives.
+CODEX_NOISE_PREFIXES = (
+    "<codex_delegation>",
+    "<environment_context>",
+    "<recommended_plugins>",
+    "<skill>",
+    "<user_instructions>",
+)
+CODEX_FILE_MANIFEST = re.compile(r"\n?#+ Files mentioned by the user:\n.*\Z", re.S)
+
+
+def _codex_text(payload, keys=("text",)):
+    out = []
+    for part in payload.get("content") or []:
+        if not isinstance(part, dict):
+            continue
+        for k in keys:
+            if part.get(k):
+                out.append(part[k])
+    return "\n\n".join(out).strip()
+
+
+def codex_rollout_files(thread_id, newest_path=None):
+    """Every rollout file for one thread, oldest first.
+
+    A resumed task writes a NEW rollout file and `threads.rollout_path` names
+    only the latest, so reading that alone loses everything before the resume --
+    including, typically, the opening request. The thread id is in each filename,
+    which is what joins the set back together.
+    """
+    paths = sorted(glob.glob(os.path.join(CODEX_HOME, "sessions", "*", "*", "*",
+                                          f"rollout-*{thread_id}*.jsonl")))
+    if newest_path and newest_path not in paths and os.path.exists(newest_path):
+        paths.append(newest_path)
+    return paths
+
+
+SEAM_KEY = 48       # normalized chars compared across a resume boundary
+SEAM_WINDOW = 4     # turns either side of the seam to look at
+
+
+def _norm(text):
+    return " ".join(text.replace("\\", "").split())
+
+
+def _seam_key(role, text):
+    """The identity a turn keeps across a resume, or None if it is too short to judge.
+
+    A replayed turn is not byte-identical: the resume re-renders it, so escaping
+    and even an expanded path can differ mid-string. What survives is the opening,
+    so the seam matches on that -- and only on the seam, where a repeat is a
+    replay rather than the user saying the same thing twice.
+    """
+    key = _norm(text)[:SEAM_KEY]
+    return (role, key) if len(key) >= 24 else None
+
+
+def codex_thread_dialogue(thread_id, newest_path=None):
+    """Turns across every rollout file for a thread, spliced at the seams.
+
+    A resume replays the message it resumed from, so the same turn ends one file
+    and begins the next -- with different escaping, which is why the seam is
+    matched on normalized text rather than equality.
+    """
+    turns = []
+    for path in codex_rollout_files(thread_id, newest_path):
+        chunk = codex_rollout_dialogue(path)
+        if turns and chunk:
+            tail = {k for k in (_seam_key(r, t) for r, t in turns[-SEAM_WINDOW:]) if k}
+            while chunk and _seam_key(*chunk[0]) in tail:
+                chunk.pop(0)
+        turns.extend(chunk)
+    return turns
+
+
+def codex_rollout_dialogue(rollout_path):
+    """Every visible human/agent turn from a Codex rollout JSONL, in order.
+
+    Dropped, for the same reason the Claude renderer drops them: `developer`
+    context, reasoning, tool calls and their output, the `agent_message` traffic
+    between an orchestrator and its own subagents (encrypted, and not this
+    conversation), peer `<codex_delegation>` envelopes, the harness's
+    `<environment_context>` block, and the attachment manifest it appends under
+    the user's name.
+    """
+    turns = []
+    with open(rollout_path, "r", errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except ValueError:
+                continue
+            if obj.get("type") != "response_item":
+                continue
+            payload = obj.get("payload") or {}
+            if payload.get("type") != "message":
+                continue        # agent_message == subagent traffic, not dialogue
+            role = payload.get("role")
+            if role == "user":
+                text = _codex_text(payload)
+                if text.startswith(CODEX_NOISE_PREFIXES):
+                    continue
+                text = CODEX_FILE_MANIFEST.sub("", text).strip()
+            elif role == "assistant":
+                text = _codex_text(payload)
+            else:
+                continue        # developer/system context
+            if text:
+                turns.append((role, text))
+    return turns
+
+
+def codex_dialogue(thread_id, rollout_path=None):
     """Every visible human/agent text item, in rollout order.
+
+    Reads the rollout JSONL when there is one, since the sqlite projection below
+    can be many turns behind on a thread that is still working.
 
     `codex_delegation` is the receiving shape for peer-task traffic. It is a
     normalized `userMessage` because it enters the model as input, but it is not
     something Derek said in the task and does not appear in a clean two-speaker
     transcript.
     """
+    turns = codex_thread_dialogue(thread_id, rollout_path)
+    if turns:
+        return turns
     with _sqlite_readonly(CODEX_HISTORY_DB) as db:
         rows = db.execute(
             """
@@ -334,12 +484,170 @@ def codex_dialogue(thread_id):
     return turns
 
 
-def render_dialogue(turns):
-    blocks = []
-    for role, text in turns:
-        label = "User" if role == "user" else "Assistant"
-        blocks.append(f"---\n\n# {label}\n\n---\n\n{text}\n")
-    return "\n".join(blocks)
+# --- the write half: a message INTO a Codex task ------------------------------
+#
+# Claude's relay is a file mailbox drained by a PreToolUse hook. Codex has no
+# hook surface, but it ships the same capability first-party: `codex queue`
+# hands a message to the app-server daemon, which delivers it to a running
+# thread the way a typed follow-up arrives. So the two runtimes differ only in
+# transport, and `send` picks the transport from the target.
+#
+# `codex queue` reaches ACTIVE sessions only -- a thread the daemon is not
+# holding open resolves to nothing and exits 1. That is a real difference from
+# the Claude mailbox, which keeps a message on disk until the target next acts,
+# and the caller is told which one it got.
+
+
+def codex_queue(thread_id, text):
+    """Hand `text` to a running Codex thread. Returns (ok, message)."""
+    cli = codex_cli()
+    if not cli:
+        return False, (
+            "the codex CLI was not found. Looked in the ChatGPT app bundle and on "
+            "$PATH; set CODEX_CLI to its path."
+        )
+    try:
+        proc = subprocess.run(
+            [cli, "queue", "--thread", thread_id, "--message", text],
+            capture_output=True, text=True, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return False, "codex queue timed out after 60s (is the desktop app running?)"
+    except OSError as exc:
+        return False, f"could not run {cli}: {exc}"
+    if proc.returncode == 0:
+        return True, (proc.stdout or "").strip()
+    detail = (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}"
+    return False, detail
+
+
+def _codex_queue_pending(thread_id, detail):
+    """True if the just-queued message is still sitting in the queue.
+
+    Read-only, best-effort: if the queue db cannot be read the caller falls back
+    to the weaker claim, which is the safe direction to be wrong in.
+    """
+    qdb = _latest_codex_db("queue")
+    match = re.search(r"([0-9a-f-]{36})", detail or "")
+    try:
+        with _sqlite_readonly(qdb) as db:
+            if match:
+                row = db.execute("SELECT 1 FROM queued_items WHERE id = ?",
+                                 (match.group(1),)).fetchone()
+                return row is not None
+            row = db.execute("SELECT 1 FROM queued_items WHERE thread_id = ?",
+                             (thread_id,)).fetchone()
+            return row is not None
+    except Exception:
+        return False
+
+
+def codex_envelope(text, sender, reply_to, reply_label):
+    """Frame a relayed message for a Codex reader.
+
+    A Codex task receives this as an ordinary user turn, with none of the
+    framing the Claude delivery hook adds. Without it the message reads as the
+    user typing mid-task with no idea where it came from and no way to answer,
+    so the envelope carries both: who is speaking, and the literal command that
+    reaches them back.
+    """
+    who = f" (from {sender})" if sender else ""
+    body = (
+        "\U0001f4ec RELAYED MESSAGE \u2014 the user injected this into your task out-of-band, "
+        "from another agent working the same tree. It is a direct interjection from the "
+        "user; give it the same weight as anything the user types. Read it, then adjust "
+        "course before continuing:\n\n"
+        f"\u2022{who} {text}\n"
+    )
+    if reply_to:
+        me = reply_label or reply_to
+        body += (
+            f"\n\u21a9\ufe0e THIS MESSAGE CARRIES A RETURN ADDRESS ({me}). The sender is "
+            "waiting on an answer and has no other way to hear one \u2014 if it is a Claude "
+            "Code session it is very likely parked on `await-reply`, which nothing but a "
+            "reply releases. If this asks you anything, or your answer would change what "
+            "it does, send one back with a shell command:\n\n"
+            "  python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py send "
+            f"\"{reply_to}\" \"<your answer>\" --from \"<your own title>\"\n"
+        )
+    return body
+
+
+def resolve_any_target(positional, cwd, kind=None):
+    """Resolve one title across BOTH runtimes.
+
+    Returns {"kind": "claude"|"codex", "id": ..., "label": ...}. The two
+    rosters are separate namespaces that happen to share a naming habit, so a
+    title present in both is ambiguous and fails loud rather than picking the
+    runtime this file happens to check first.
+    """
+    codex_hit = None
+    if kind in (None, "codex"):
+        try:
+            matches = [s for s in list_codex_sessions(cwd) if s["title"] == positional]
+            if len(matches) == 1:
+                codex_hit = {"kind": "codex", "id": matches[0]["id"], "label": positional}
+            elif len(matches) > 1:
+                sys.stderr.write(
+                    f"Ambiguous Codex task title {positional!r} ({len(matches)} matches). "
+                    "Pass a thread id:\n"
+                )
+                for s in matches:
+                    sys.stderr.write(f"  {s['id']}\n")
+                sys.exit(1)
+            elif UUID_RE.match(positional or ""):
+                by_id = [s for s in list_codex_sessions(cwd) if s["id"] == positional]
+                if by_id:
+                    codex_hit = {"kind": "codex", "id": positional, "label": by_id[0]["title"]}
+        except FileNotFoundError:
+            codex_hit = None
+    if kind == "codex":
+        if codex_hit:
+            return codex_hit
+        sys.stderr.write(f"No user-titled Codex task {positional!r} in {os.path.realpath(cwd)}.\n")
+        sys.stderr.write("Run 'jsonl2md.py list-codex-sessions' to see exact titles.\n")
+        sys.exit(1)
+
+    claude_hit = None
+    if kind in (None, "claude"):
+        sessions = list_sessions(cwd)
+        by_title = [s for s in sessions
+                    if s.get("title") == positional and s.get("cliSessionId")]
+        if len(by_title) == 1:
+            claude_hit = {"kind": "claude", "id": by_title[0]["cliSessionId"],
+                          "label": by_title[0].get("title")}
+        elif len(by_title) > 1:
+            sys.stderr.write(
+                f"Ambiguous title {positional!r} ({len(by_title)} matches). "
+                "Pass a cliSessionId:\n"
+            )
+            for s in by_title:
+                sys.stderr.write(
+                    f"  {s['cliSessionId']}  lastActivityAt={s.get('lastActivityAt')}\n"
+                )
+            sys.exit(1)
+        elif UUID_RE.match(positional or "") and os.path.exists(jsonl_path_for(positional, cwd)):
+            claude_hit = {"kind": "claude", "id": positional, "label": positional}
+        elif is_cloud(positional):
+            claude_hit = {"kind": "claude", "id": positional, "label": positional}
+
+    if claude_hit and codex_hit:
+        sys.stderr.write(
+            f"{positional!r} names BOTH a Claude session and a Codex task. They are separate\n"
+            f"runtimes with separate rosters; say which:\n"
+            f"  --kind claude   {claude_hit['id']}\n"
+            f"  --kind codex    {codex_hit['id']}\n"
+        )
+        sys.exit(1)
+    if claude_hit:
+        return claude_hit
+    if codex_hit:
+        return codex_hit
+    sys.stderr.write(
+        f"No session or task named {positional!r} in {os.path.realpath(cwd)}.\n"
+        "Run 'jsonl2md.py board' to see both rosters.\n"
+    )
+    sys.exit(1)
 
 
 def cmd_list_codex_sessions(args):
@@ -358,9 +666,10 @@ def cmd_export_codex_session(args):
     else:
         print("export-codex-session: provide a title or --all", file=sys.stderr)
         sys.exit(2)
-    os.makedirs(args.out, exist_ok=True)
+    if not args.tail:
+        os.makedirs(args.out, exist_ok=True)
     for task in targets:
-        turns = codex_dialogue(task["id"])
+        turns = codex_dialogue(task["id"], task.get("rollout_path"))
         if not turns:
             print(
                 f"No projected user/assistant dialogue for {task['title']!r} "
@@ -368,9 +677,17 @@ def cmd_export_codex_session(args):
                 file=sys.stderr,
             )
             continue
+        if args.tail:
+            turns = turns[-args.tail:]
+        md = render_blocks(turns, args.compact)
+        # --tail is the "just show me the end of it" path the relay uses on a long
+        # task, so it goes to stdout: a file would only be read straight back.
+        if args.tail:
+            sys.stdout.write(md)
+            continue
         md_path = os.path.join(args.out, safe_name(task["title"]) + ".md")
         with open(md_path, "w") as f:
-            f.write(render_dialogue(turns))
+            f.write(md)
         print(md_path)
 
 
@@ -1328,6 +1645,69 @@ def cmd_situation(args):
     return 0
 
 
+def cmd_board(args):
+    """Every agent in this project, both runtimes, and the call that reaches each.
+
+    `situation` answers "who else is here" for Claude. This answers the question
+    that has to come first once a second runtime is in the tree: what is the whole
+    address space, and which verb reaches which half of it. A Codex task and a
+    Claude session are both just a title here; the REACH column is the difference.
+    """
+    peers = peer_addresses()
+    rows = []
+    for s in list_sessions(args.cwd):
+        cli = s.get("cliSessionId")
+        if not cli or cli in (args.exclude or []):
+            continue
+        if is_cloud(cli):
+            reach = "(cloud - read only)"
+        elif peers.get(cli):
+            reach = f'SendMessage to: {peers[cli]["name"]}'
+        else:
+            reach = f'send "{s.get("title")}"'
+        rows.append(("claude", s.get("title") or cli[:8], reach,
+                     _ms_stamp(s.get("lastActivityAt"))))
+    try:
+        for t in list_codex_sessions(args.cwd):
+            rows.append(("codex", t["title"], f'send "{t["title"]}"',
+                         _ms_stamp(t.get("recency_at_ms"))))
+    except FileNotFoundError:
+        sys.stderr.write("[board] no Codex state db found; listing Claude only.\n")
+    if args.json:
+        json.dump([{"runtime": r, "title": t, "reach": a, "last": w} for r, t, a, w in rows],
+                  sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return 0 if rows else 1
+    if not rows:
+        sys.stderr.write(f"nothing titled in {args.cwd}\n")
+        return 1
+    rw = max([len(r[0]) for r in rows] + [len("RUNTIME")])
+    tw = max([len(r[1]) for r in rows] + [len("TITLE")])
+    aw = max([len(r[2]) for r in rows] + [len("REACH IT WITH")])
+    print(f'{"RUNTIME":<{rw}}  {"TITLE":<{tw}}  {"REACH IT WITH":<{aw}}  LAST')
+    for runtime, title, reach, when in rows:
+        print(f"{runtime:<{rw}}  {title:<{tw}}  {reach:<{aw}}  {when}")
+    return 0
+
+
+def _ms_stamp(ms):
+    """Epoch-ms (Codex `recency_at_ms`, Claude `lastActivityAt`) to a readable stamp.
+
+    Claude metadata has carried `lastActivityAt` as both an int and an ISO string
+    across builds, so a non-numeric value is passed through rather than dropped.
+    """
+    if not ms:
+        return ""
+    if isinstance(ms, str):
+        if not ms.isdigit():
+            return ms[:16].replace("T", " ")
+        ms = int(ms)
+    try:
+        return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        return ""
+
+
 def cmd_list_chats(args):
     for c in list_chats(args.limit):
         print(c.get("name") or "(untitled)")
@@ -1596,8 +1976,65 @@ def cmd_await_reply(args):
         time.sleep(args.interval)
 
 
+def _label_for_id(cli_id, cwd):
+    """Best-effort title for a cliSessionId, for the return address. Never fatal."""
+    try:
+        for s in list_sessions(cwd):
+            if s.get("cliSessionId") == cli_id:
+                return s.get("title")
+    except Exception:
+        pass
+    return None
+
+
+def _send_codex(args, target):
+    """Deliver into a Codex task through `codex queue`."""
+    if args.mode == "nudge":
+        sys.stderr.write(
+            "[relay] --mode nudge has no Codex equivalent: a queued message is delivered\n"
+            "[relay] as a follow-up turn, which the agent always reads. Sending it as one.\n"
+        )
+    reply_label = _label_for_id(args.reply_to, args.cwd) if args.reply_to else None
+    text = codex_envelope(args.text, args.sender, args.reply_to, reply_label)
+    ok, detail = codex_queue(target["id"], text)
+    if not ok:
+        sys.stderr.write(
+            f"[relay] could not queue for Codex task {target['label']!r} "
+            f"({target['id']}):\n[relay]   {detail}\n"
+        )
+        if "No active session" in detail:
+            sys.stderr.write(
+                "[relay] the app-server daemon did not resolve that name. It must be running\n"
+                "[relay] (the desktop app, or `codex app-server daemon`) and the title must be\n"
+                "[relay] exact -- run `jsonl2md.py board` for the roster. Nothing was sent.\n"
+            )
+        return 1
+    # `codex queue` reports success on handing the message to the daemon, which is
+    # not the same as the agent having read it. The queue row is: a thread that is
+    # running consumes it at once, a parked one leaves it until it next runs. Say
+    # which happened rather than claiming delivery either way.
+    parked = _codex_queue_pending(target["id"], detail)
+    landed = ("queued behind the task's current turn; it is delivered when that turn ends"
+              if parked else "delivered into the running task as a follow-up turn")
+    sys.stderr.write(
+        f"[relay] {target['label']!r} ({target['id']}): {landed}.\n"
+    )
+    if args.reply_to:
+        sys.stderr.write(
+            f"[relay] return address recorded: {args.reply_to}. Nothing will wake you when\n"
+            f"[relay] the answer comes -- arm the watcher, in the BACKGROUND, before you stop:\n"
+            f"[relay]   {os.path.basename(__file__)} await-reply {args.reply_to} --timeout 3600\n"
+        )
+    if detail:
+        print(detail)
+    return 0
+
+
 def cmd_send(args):
-    cli_id, label = resolve_target(args.title, args.cwd)
+    target = resolve_any_target(args.title, args.cwd, getattr(args, "kind", None))
+    if target["kind"] == "codex":
+        return _send_codex(args, target)
+    cli_id, label = target["id"], target["label"]
     if is_cloud(cli_id):
         sys.stderr.write(
             f"[relay] {label} runs on Anthropic's machines, not this one. The relay\n"
@@ -1731,7 +2168,7 @@ def main():
     )
     sub = ap.add_subparsers(
         dest="cmd",
-        metavar="{list-codex-sessions,export-codex-session,list-sessions,situation,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
+        metavar="{list-codex-sessions,export-codex-session,list-sessions,situation,board,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
     )
 
     p_cls = sub.add_parser(
@@ -1758,6 +2195,12 @@ def main():
                        help="export every visible user-titled task in the target cwd")
     p_ces.add_argument("--cwd", default=DEFAULT_CWD,
                        help=f"project path to filter by (default: {DEFAULT_CWD})")
+    p_ces.add_argument("--tail", type=int, metavar="K",
+                       help="emit only the last K turns, to stdout instead of a file "
+                            "(the relay's shortcut for a long task)")
+    p_ces.add_argument("--compact", nargs="?", type=int, const=6, default=0, metavar="N",
+                       help="coalesce each run of consecutive agent turns and cut its middle, "
+                            "keeping N lines at either end (default 6); your own turns are never cut")
     p_ces.add_argument("--out", default=".",
                        help="output directory (default: current dir)")
     p_ces.set_defaults(func=cmd_export_codex_session)
@@ -1806,6 +2249,20 @@ def main():
     p_sit.add_argument("--cwd", default=DEFAULT_CWD,
                        help=f"project path to filter by (default: {DEFAULT_CWD})")
     p_sit.set_defaults(func=cmd_situation)
+
+    p_board = sub.add_parser(
+        "board",
+        help="both runtimes in one roster: every Claude session and Codex task, "
+             "and the call that reaches each",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_board.add_argument("--exclude", action="append", default=[], metavar="SESSION",
+                         help="leave a session out by cliSessionId; repeatable")
+    p_board.add_argument("--json", action="store_true", help="emit the rows as JSON")
+    p_board.add_argument("--cwd", default=DEFAULT_CWD,
+                         help=f"project path to filter by (default: {DEFAULT_CWD})")
+    p_board.set_defaults(func=cmd_board)
 
     p_es = sub.add_parser(
         "export-session",
@@ -1896,6 +2353,9 @@ def main():
     p_send.add_argument("--reply-to", dest="reply_to", default=None,
                         help="your OWN cliSessionId, given to the receiver as a return address "
                              "and echoed back as the await-reply line to arm before you stop")
+    p_send.add_argument("--kind", choices=["claude", "codex"], default=None,
+                        help="disambiguate when one title names a session in both runtimes "
+                             "(default: resolve across both and fail loud on a collision)")
     p_send.add_argument("--force-relay", action="store_true",
                         help="use the file mailbox even when the target is on the native peer "
                              "channel (default: refuse, and print the SendMessage call to use)")

@@ -1,26 +1,33 @@
 ---
-description: Interject into another of my live Claude Code sessions — queue a message that lands on that session's next tool call. The write half of /relay.
-argument-hint: <target session title> — <message to deliver>
+description: Interject into another of my live agents — a Claude Code session or a Codex task — by queueing a message it picks up on its next turn. The write half of /relay.
+argument-hint: <target session or task title> — <message to deliver>
 allowed-tools: Bash(python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py:*)
 ---
 
-Send a message INTO another of the user's live Claude Code sessions. Unlike `/relay` (which pulls a session's transcript in here, read-only), this writes: it queues a message that the target session's delivery hook injects on its **next tool call**. Delivery is poll-on-action, not push — a working agent gets it within a tool call or two; a fully idle one waits until it next acts.
+Send a message INTO another of the user's live agents. Unlike `/relay` (which pulls a transcript in here, read-only), this writes.
+
+Two runtimes work this machine and one verb reaches both — `send` resolves the title and picks the transport:
+
+- a **Claude Code session** gets a file in its relay mailbox, which its delivery hook injects on that session's **next tool call**. Poll-on-action, not push: a working agent gets it within a tool call or two; a fully idle one waits until it next acts.
+- a **Codex task** gets it through `codex queue`, delivered as a follow-up turn. A running task is interrupted at the end of its current turn; a parked one takes it when it next runs. The tool says which of the two happened.
 
 Request: **$ARGUMENTS**
 
 Steps:
 
 1. **Resolve the target.** Run:
-   `python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py list-sessions`
-   Match the target from $ARGUMENTS to exactly one title. If ambiguous or absent, show the candidates and ask — never guess. It must not be this current session. (Add `--cwd <path>` if it lives in another project.)
+   `python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py board`
+   One roster across both runtimes, with a `RUNTIME` column. Match the target from $ARGUMENTS to exactly one title. If ambiguous or absent, show the candidates and ask — never guess. It must not be this current session. (Add `--cwd <path>` if it lives in another project.)
+
+   A handful of titles exist in **both** runtimes. `send` refuses those rather than guessing; pass `--kind claude` or `--kind codex` to say which.
 
 2. **Confirm the message.** From $ARGUMENTS, separate the target from the message text. If the user hasn't given explicit text — e.g. they asked you to "tell them to reconsider" after reviewing that session via `/relay` — draft the message, show it, and confirm before sending. Keep it to what the receiving agent needs: it sees only this text, not our conversation.
 
 3. **Send it.** Run:
-   `python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py send "<matched title>" "<message>"`
-   Default mode is **interrupt** — it blocks the target's next tool call and puts the message in front of it. Add `--mode nudge` to attach the message without blocking (gentler, but the agent may sail past it). Add `--from "<label>"` to tag who's speaking.
+   `python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py send "<matched title>" "<message>" --from "<label>"`
+   For a Claude target the default mode is **interrupt** — it blocks the target's next tool call and puts the message in front of it; `--mode nudge` attaches it without blocking (gentler, but the agent may sail past it). A Codex target has no such distinction: a queued message is always read, and `--mode nudge` is ignored with a note. `--from` tags who's speaking, and is worth setting either way — the receiver sees the text and nothing else.
 
-4. **Report** the queued path it prints and that delivery happens on the target's next tool call. This never reads or disturbs the target's transcript — it only drops a message in its mailbox.
+4. **Report** what it printed — the queued mailbox path for a Claude target, or the queued/delivered line for a Codex one. This never reads or disturbs the target's transcript.
 
 ## If you want an answer, arm the watcher before you stop
 
@@ -35,7 +42,7 @@ python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py await-reply <YOUR OWN
 
 Run the second one with **`run_in_background: true`**. It blocks until something lands in your mailbox and then exits, and that exit is your wake-up — one notification, no polling on your part. `--timeout 0` waits indefinitely; the default hour is usually the right ceiling.
 
-- **`--reply-to` is your own id, not the target's.** It rides along as a return address, and the receiving agent is told plainly that you are parked and that silence blocks you.
+- **`--reply-to` is your own id, not the target's.** It rides along as a return address, and the receiving agent is told plainly that you are parked and that silence blocks you. A Codex receiver gets the literal shell command that reaches you, since it has no relay tooling of its own beyond this same script.
 - **Your own id is in your scratchpad path** — `/tmp/claude-<uid>/<project>/<SESSION-ID>/scratchpad`. `await-reply` will not infer it, deliberately: the freshest transcript in a shared project belongs to the session you are waiting *on*, so guessing picks exactly the wrong mailbox and then waits forever in silence.
 - **It does not drain the mailbox.** The delivery hook still hands you the full text, properly framed, on your next tool call; `await-reply` only tells you someone answered.
 
@@ -43,7 +50,7 @@ Run the second one with **`run_in_background: true`**. It blocks until something
 
 ## Reaching for this yourself
 
-This command is model-invocable: when the user has pointed you at another session — "coordinate with X", "that's the other agent working on this" — sending is yours to do, not something to hand back. You do not need the slash command to do it; step 3's `send` is a plain Bash call and the same rules apply either way.
+This command is model-invocable: when the user has pointed you at another agent — "coordinate with X", "that's the other agent working on this", "the Codex agent is taking that over" — sending is yours to do, not something to hand back. You do not need the slash command to do it; step 3's `send` is a plain Bash call and the same rules apply either way.
 
 Three rules, because this WRITES into a context that is not yours:
 

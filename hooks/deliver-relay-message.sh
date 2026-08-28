@@ -56,11 +56,13 @@ for f in "${files[@]}"; do
   else
     body+="• ${mtext}"$'\n'
   fi
-  # A return address means the sender is WAITING on an answer, and is almost
-  # certainly parked on `await-reply` — which only ends when something lands in
-  # its mailbox. Not replying leaves it blocked until its timeout.
+  # A return address means the sender wants an answer. A Claude session is very
+  # likely parked on `await-reply`, which only ends when something lands in its
+  # mailbox, so silence blocks it until its timeout. A Codex task is addressed by
+  # its title instead and cannot park -- it just never hears back. Either way the
+  # reply goes out the same verb, so the address is quoted: titles have spaces.
   if [[ -n "$mrepl" ]]; then
-    replies+="  python3 \$HOME/Developer/claude-code-setup/jsonl2md/jsonl2md.py send ${mrepl} \"<your answer>\" --reply-to <your own id>"$'\n'
+    replies+="  python3 \$HOME/Developer/claude-code-setup/jsonl2md/jsonl2md.py send \"${mrepl}\" \"<your answer>\" --reply-to <your own id>"$'\n'
   fi
 done
 
