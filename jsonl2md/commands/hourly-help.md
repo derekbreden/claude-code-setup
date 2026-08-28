@@ -101,6 +101,15 @@ the acting.
 left is genuinely blocked. Work independent items in parallel with spawned subagents. An agent
 that does one thing and stops has failed the run.
 
+**A loud tool is not a backlog.** Before treating any red or noisy output as a finding, read
+what that tool says it is for and whether the board runs it. This repo keeps debugging
+instruments that are meant to be loud: `tools/docgen/lint.py` reports every NAME whose value
+differs across files, and its own docstring says a NAME is scoped to the file it is
+substituted in, that parts sharing only a variable name are expected to collide, and to "run
+it when a number looks wrong, not on a schedule." A sweep that reads that output as work will
+either churn correct files or wire a permanently-red check onto the board. "No board check
+reads this" is sometimes a gap and sometimes a decision; the docstring says which.
+
 **Nothing** is a real answer when nothing passes the test, and better than a manufactured one.
 
 Two things are never candidates. **Do not route work back through him** — no queued question,
