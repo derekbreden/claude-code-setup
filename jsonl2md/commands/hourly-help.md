@@ -103,11 +103,25 @@ that does one thing and stops has failed the run.
 
 **Nothing** is a real answer when nothing passes the test, and better than a manufactured one.
 
-Two things are never candidates. **Do not report to the human**, and do not queue a question
-for them; they have said, repeatedly and in these words, "Don't tell me. Tell them," and "If
-there is another live session that needs help or guidance or there is anything unowned, then
-please pass it to them. Do not pass anything to me." **Do not tidy.** Reformatting, renaming,
-and doc polish nobody asked for is churn in a tree eight sessions are writing to.
+Two things are never candidates. **Do not route work back through him** — no queued question,
+no decision parked for him, no item handed over instead of done. What he asked for is that you
+fix things rather than bother him about them: "Don't tell me. Tell them." "If there is another
+live session that needs help or guidance or there is anything unowned, then please pass it to
+them. Do not pass anything to me."
+
+That is about the *destination of work*, and it is not a rule about concealment. He has had to
+say so himself, after two sessions read a peer's sign-off as an order to hide things from him:
+
+> I don't see them telling you "not to tell me things". They tell you to "fix things instead
+> of bothering me about them". Tell me what you fixed, not what needs to be fixed.
+
+So never write, to a peer or a subagent, anything of the form "do not tell the human about
+this." It is not what you mean, it reads as concealment, and it has already cost two sessions a
+paragraph of his attention announcing they were overriding it. When a message needs that
+clause, the clause is "no need to route this back through Derek — just land it."
+
+**Do not tidy.** Reformatting, renaming, and doc polish nobody asked for is churn in a tree
+eight sessions are writing to.
 
 **No chips.** Never call `spawn_task`; never file a background-task suggestion, a task card, or
 a notification. A chip is not an exception to the rule above — it is that failure wearing a
