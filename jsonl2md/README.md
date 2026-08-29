@@ -78,6 +78,12 @@ is dropped. A slash command renders as the line you actually typed (`/relay Zip 
 attached quote keeps the quote and loses its marker, and spliced-in system reminders are cut
 out. The same filter now runs for every verb, so `export-session` and `delta` are clean too.
 
+One case reads the other way. A slash command normally arrives wearing an envelope, but one
+that never expands arrives flagged the same way an injected body is, carrying nothing but the
+line that was typed. That line is speech — a fleet driven by slash commands reads as an empty
+one without it — and its shape is what separates the two: across 1795 flagged records in this
+corpus, a lone command line matched once, and it was the invocation.
+
 `--since` turns it into a question with a yes/no answer, and the exit status carries that
 answer — 0 if anything falls in the window, 1 if nothing does. That is the gate an automated
 caller needs:
@@ -86,9 +92,15 @@ caller needs:
 ./jsonl2md.py recent-prompts --since 1h -n 0 --exclude "$MY_SESSION" || exit 0
 ```
 
-`--exclude` takes a title or a `cliSessionId` prefix and is repeatable. A tool that reads its
-own session counts its own prompts as the human's and finds work it already did, so anything
-automated passes its own id here.
+`--exclude` takes a title, a `cliSessionId` prefix, or the peer address an untitled session
+answers to, and is repeatable. A tool that reads its own session counts its own prompts as the
+human's and finds work it already did, so anything automated passes its own id here — and
+because a helper is spawned rather than named, the exclusion has to reach untitled sessions or
+it fails for the one caller that depends on it.
+
+The question this gate asks is whether the human is here, so it looks where he talks, which
+includes sessions that have not been titled yet. A new session is untitled until it earns a
+name, which makes it the likeliest home of the freshest thing he said.
 
 ### Who else is here: `situation`
 
@@ -106,7 +118,21 @@ the mistake waiting to be made, so this joins them by `cliSessionId`, which all 
 The state column comes from [`peer_idle.py`](peer_idle.py), imported rather than
 reimplemented. Live sessions that were never titled fold in under their peer name in
 parentheses: invisible to `list-sessions` by design, but still workers, still reachable, and
-possibly the ones holding something nobody owns.
+possibly the ones holding something nobody owns. They run through `--exclude` on the way in,
+the same as the titled half.
+
+### The rules under test: `selftest`
+
+```sh
+./jsonl2md.py selftest      # prints N/N, exits 1 on failure
+```
+
+Two rules here fail silently when they break, which is why they are the ones held. A gate that
+cannot see the human reports a quiet hour and the routine simply does not run. An `--exclude`
+that misses reads a helper's own work back to it as a peer's. Neither raises, neither shows up
+in output anyone reads, and both would sit broken indefinitely. Each case was checked against
+a deliberately broken copy of the code it guards, so a case that stops holding fails rather
+than passing on a mutation.
 
 ### Reading everything at once: `--compact`
 
@@ -184,6 +210,9 @@ ln -s "$PWD/commands/relay.md" ~/.claude/commands/relay.md
 # What you asked for most recently, across every session
 ./jsonl2md.py recent-prompts
 ./jsonl2md.py recent-prompts -n 20 --chars 300
+
+# Hold the rules the automated callers depend on
+./jsonl2md.py selftest
 
 # Claude.ai chats (desktop app sidebar)
 ./jsonl2md.py list-chats

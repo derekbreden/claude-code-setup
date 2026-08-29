@@ -149,6 +149,12 @@ SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.S)
 COMMAND_NAME_RE = re.compile(r"<command-name>\s*(.*?)\s*</command-name>", re.S)
 COMMAND_ARGS_RE = re.compile(r"<command-args>\s*(.*?)\s*</command-args>", re.S)
 ATTACH_MARK_RE = re.compile(r"^<!--\s*attach\s*-->[ \t]*\n?", re.M)
+# A slash command normally arrives wearing a <command-name> envelope. One that
+# never expanded arrives flagged isMeta with no envelope and no body -- the only
+# trace of it is the line that was typed. This matches that line and nothing
+# else: across 1795 isMeta records in the corpus, every other one is either an
+# expanded command body (prose) or a tagged envelope.
+BARE_COMMAND_RE = re.compile(r"^/[A-Za-z0-9][\w:-]*(?:[ \t]+\S.*)?$")
 INJECTED = (
     "<task-notification>",
     "<local-command-stdout>",
@@ -164,9 +170,15 @@ def user_speech(obj, text):
     A slash command arrives as an envelope and renders as the line you actually
     typed, `/name args`; an attached quote keeps the quote and drops its marker;
     system reminders are cut wherever they were spliced in."""
-    if "toolUseResult" in obj or obj.get("isSidechain") or obj.get("isMeta"):
+    if "toolUseResult" in obj or obj.get("isSidechain"):
         return ""
     text = SYSTEM_REMINDER_RE.sub("", text).strip()
+    if obj.get("isMeta"):
+        # isMeta covers everything typed for the human -- expanded bodies, task
+        # notifications -- and also an unexpanded slash command, which they did
+        # type. A caller gating on "is the human here" reads a fleet driven by
+        # slash commands as an empty one if this is dropped with the rest.
+        return text if BARE_COMMAND_RE.match(text) else ""
     if not text or text.startswith(INJECTED):
         return ""
     name = COMMAND_NAME_RE.search(text)
@@ -1499,23 +1511,32 @@ def ago(seconds):
     return f"{s // 86400}d{(s % 86400) // 3600:02d}h"
 
 
+def dropped_by(exclude, cli, *names):
+    """True when --exclude names this session, by cliSessionId prefix or by any
+    name it answers to. A titled session answers to its title; an untitled one
+    answers to its peer address, which is the only name the board ever printed
+    for it. Both callers share this so that a session cannot be excluded from
+    one view of the fleet and survive in another."""
+    drop = set(exclude or [])
+    if not drop:
+        return False
+    if any(n and n in drop for n in names):
+        return True
+    return bool(cli) and any(d and cli.startswith(d) for d in drop)
+
+
 def select_sessions(cwd, exclude):
     """Titled sessions in cwd, minus any named in --exclude (exact title or a
     cliSessionId prefix). A routine that reads its own session sees its own
     prompts as the human's, and finds work it has already done -- excluding
     itself is what makes an automated caller honest."""
-    drop = set(exclude or [])
-    out = []
-    for s in list_sessions(cwd):
-        cli = s.get("cliSessionId") or ""
-        if s.get("title") in drop or any(cli.startswith(d) for d in drop if d):
-            continue
-        out.append(s)
-    return out
+    return [s for s in list_sessions(cwd)
+            if not dropped_by(exclude, s.get("cliSessionId") or "", s.get("title"))]
 
 
 def cmd_recent_prompts(args):
-    sessions = select_sessions(args.cwd, args.exclude)
+    sessions = (select_sessions(args.cwd, args.exclude)
+                + untitled_sessions(args.cwd, args.exclude))
     if args.session:
         cli_id, label = resolve_target(args.session, args.cwd)
         sessions = ([s for s in sessions if s.get("cliSessionId") == cli_id]
@@ -1576,7 +1597,8 @@ def _peer_idle_module():
         return None
 
 
-def situation(cwd, exclude=None):
+def live_states(cwd):
+    """Every live session in cwd by id, with the state peer_idle reads off it."""
     pi = _peer_idle_module()
     states = {}
     if pi:
@@ -1584,19 +1606,41 @@ def situation(cwd, exclude=None):
             row = pi.state_of(sess, cwd)
             if row.get("sessionId"):
                 states[row["sessionId"]] = row
+    return states
+
+
+def untitled_sessions(cwd, exclude=None, states=None, peers=None):
+    """Live sessions in cwd that were never titled.
+
+    A session is invisible to list-sessions until it is named. That is the right
+    default for listing work and the wrong one for every question about who is
+    here: it is still a worker, still reachable, and the human still talks to it
+    -- a new session is untitled until it earns a name, so the freshest thing he
+    said is the likeliest to live in one. Both callers that ask such a question
+    read this, and both run it through the same --exclude: a helper is untitled
+    by construction, so an exclusion reaching only titled rows would fail for the
+    one caller that depends on it, and the helper would read itself as a peer."""
+    states = live_states(cwd) if states is None else states
+    peers = peer_addresses() if peers is None else peers
+    known = {s.get("cliSessionId") for s in list_sessions(cwd)}
+    out = []
+    for sid in sorted(set(states) | set(peers)):
+        if sid in known:
+            continue
+        name = ((peers.get(sid) or {}).get("name")
+                or (states.get(sid) or {}).get("name"))
+        if dropped_by(exclude, sid, name):
+            continue
+        out.append({"cliSessionId": sid, "cwd": cwd, "titleSource": "process",
+                    "title": "(" + (name or sid[:8]) + ")"})
+    return out
+
+
+def situation(cwd, exclude=None):
+    states = live_states(cwd)
     peers = peer_addresses()
     now = time.time()
-    # A live session that was never titled is invisible to list-sessions by
-    # design, but it is still a worker, still reachable, and may be the one
-    # holding something unowned. Fold the unmatched live ids in under their peer
-    # name so the board is every agent in the tree, not every named one.
-    known = {s.get("cliSessionId") for s in list_sessions(cwd)}
-    untitled = [
-        {"cliSessionId": sid, "cwd": cwd, "titleSource": "process",
-         "title": "(" + ((peers.get(sid) or {}).get("name")
-                         or (states.get(sid) or {}).get("name") or sid[:8]) + ")"}
-        for sid in sorted(set(states) | set(peers)) if sid not in known
-    ]
+    untitled = untitled_sessions(cwd, exclude, states, peers)
     rows = []
     for s in select_sessions(cwd, exclude) + untitled:
         cli = s.get("cliSessionId")
@@ -2137,6 +2181,9 @@ examples:
   jsonl2md.py situation
   jsonl2md.py situation --exclude "My Own Session" --json
 
+  # Hold the rules the automated callers depend on. Prints N/N, exits 1 on failure.
+  jsonl2md.py selftest
+
   # Read every session at once: your turns whole, each agent run cut in the middle
   jsonl2md.py export-session --all --compact --out ./compact
   jsonl2md.py export-session --all --compact 3 --out ./tighter
@@ -2184,6 +2231,120 @@ examples:
 """
 
 
+# --- selftest ----------------------------------------------------------------
+
+def cmd_selftest(args):
+    """Hold the two rules the fleet's automated callers depend on.
+
+    Both are silent when broken. A gate that cannot see the human reports a
+    quiet hour and the routine simply does not run; an --exclude that misses
+    reads the helper's own work back to it as a peer's. Neither raises, so
+    neither is noticed without a case that fails."""
+    cases, failed = [], []
+
+    def check(name, got, want):
+        cases.append(name)
+        if got != want:
+            failed.append(f"{name}\n    want: {want!r}\n    got:  {got!r}")
+
+    # user_speech: what the human typed survives, what was typed for them does not.
+    plain = {"message": {"role": "user", "content": "hello"}}
+    check("plain prose is speech", user_speech(plain, "hello"), "hello")
+    check("tool result is not speech",
+          user_speech({"toolUseResult": {}}, "ok"), "")
+    check("sidechain is not speech",
+          user_speech({"isSidechain": True}, "ok"), "")
+    check("task notification is not speech",
+          user_speech({}, "<task-notification>done</task-notification>"), "")
+    check("peer message is not speech",
+          user_speech({}, "Another Claude session sent a message: hi"), "")
+    check("system reminder is cut",
+          user_speech({}, "keep <system-reminder>drop</system-reminder>"), "keep")
+    check("command envelope renders as the typed line",
+          user_speech({}, "<command-name>/relay</command-name>"
+                          "<command-args>Corbel</command-args>"), "/relay Corbel")
+
+    # The regression: an unexpanded slash command is flagged isMeta and carries
+    # no envelope, so the flag alone cannot tell it from an expanded body.
+    check("unexpanded slash command is speech",
+          user_speech({"isMeta": True}, "/hourly-help"), "/hourly-help")
+    check("unexpanded slash command with args is speech",
+          user_speech({"isMeta": True}, "/loop 1h /hourly-help"), "/loop 1h /hourly-help")
+    check("expanded command body is not speech",
+          user_speech({"isMeta": True}, "# /loop\n\nParse the input below"), "")
+    check("meta prose is not speech",
+          user_speech({"isMeta": True}, "Caveat: the messages below were generated"), "")
+    check("a path is not a slash command",
+          user_speech({"isMeta": True}, "/Users/derek/Developer/x.py"), "")
+    check("a meta tagged envelope is not speech",
+          user_speech({"isMeta": True}, "<local-command-stdout>ok</local-command-stdout>"), "")
+
+    # dropped_by: one rule, so a session cannot be excluded from one view and
+    # survive in another.
+    check("id prefix excludes", dropped_by(["1820de5e"], "1820de5e-c938-4", None), True)
+    check("full id excludes",
+          dropped_by(["1820de5e-c938-4"], "1820de5e-c938-4", None), True)
+    check("title excludes", dropped_by(["Corbel"], "abc123", "Corbel"), True)
+    check("address excludes",
+          dropped_by(["homesodamachine-35"], "abc123", None, "homesodamachine-35"), True)
+    check("unrelated survives", dropped_by(["Thick"], "abc123", "Corbel"), False)
+    check("empty exclude drops nothing", dropped_by([], "abc123", "Corbel"), False)
+    check("a name is not a prefix of the id",
+          dropped_by(["abc"], "abc123", "Corbel"), True)
+
+    # situation(): the untitled fold-in obeys --exclude. The helper is untitled
+    # by construction, so this is the only path its own exclusion travels.
+    import types, io
+    saved = (globals()["list_sessions"], globals()["peer_addresses"],
+             globals()["_peer_idle_module"], globals()["session_prompts"],
+             globals()["is_cloud"])
+    try:
+        globals()["list_sessions"] = lambda cwd: []
+        globals()["peer_addresses"] = lambda: {"deadbeef-0000": {"name": "helper-35"}}
+        globals()["_peer_idle_module"] = lambda: None
+        globals()["session_prompts"] = lambda s: []
+        globals()["is_cloud"] = lambda cli: False
+        check("untitled row appears with no exclusion",
+              [r["title"] for r in situation("/tmp")], ["(helper-35)"])
+        check("untitled row is excluded by id",
+              [r["title"] for r in situation("/tmp", ["deadbeef"])], [])
+        check("untitled row is excluded by address",
+              [r["title"] for r in situation("/tmp", ["helper-35"])], [])
+        # recent-prompts asks whether the human is here, so it has to look
+        # where he talks. A session is untitled until it earns a name.
+        check("untitled sessions are offered to callers",
+              [s["title"] for s in untitled_sessions("/tmp")], ["(helper-35)"])
+        check("untitled sessions honour --exclude by id",
+              untitled_sessions("/tmp", ["deadbeef"]), [])
+        check("untitled sessions honour --exclude by address",
+              untitled_sessions("/tmp", ["helper-35"]), [])
+
+        globals()["session_prompts"] = lambda s: (
+            [{"when": "2026-01-01T00:00:00.000Z", "text": "/hourly-help",
+              "session": s.get("title"), "path": "x", "line": 1, "uuid": "u"}]
+            if s.get("cliSessionId") == "deadbeef-0000" else [])
+        buf, real = io.StringIO(), sys.stdout
+        ns = types.SimpleNamespace(cwd="/tmp", exclude=None, session=None,
+                                   since=None, limit=5, json=False, chars=200)
+        try:
+            sys.stdout = buf
+            rc = cmd_recent_prompts(ns)
+        finally:
+            sys.stdout = real
+        check("the gate reads an untitled session's prompts", rc, 0)
+        check("and reports what was typed there",
+              "/hourly-help" in buf.getvalue(), True)
+    finally:
+        (globals()["list_sessions"], globals()["peer_addresses"],
+         globals()["_peer_idle_module"], globals()["session_prompts"],
+         globals()["is_cloud"]) = saved
+
+    for f in failed:
+        sys.stderr.write("FAIL " + f + "\n")
+    print(f"{len(cases) - len(failed)}/{len(cases)}")
+    return 1 if failed else 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -2192,7 +2353,7 @@ def main():
     )
     sub = ap.add_subparsers(
         dest="cmd",
-        metavar="{list-codex-sessions,export-codex-session,list-sessions,situation,board,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,await-reply}",
+        metavar="{list-codex-sessions,export-codex-session,list-sessions,situation,board,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,await-reply,selftest}",
     )
 
     p_cls = sub.add_parser(
@@ -2403,6 +2564,11 @@ def main():
     p_await.add_argument("--interval", type=float, default=3.0, help="poll seconds (default: 3.0)")
     p_await.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
     p_await.set_defaults(func=cmd_await_reply)
+
+    p_self = sub.add_parser(
+        "selftest",
+        help="hold the rules the automated callers depend on; prints N/N, exits 1 on failure")
+    p_self.set_defaults(func=cmd_selftest)
 
     args = ap.parse_args()
     if not args.cmd:
