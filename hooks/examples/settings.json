@@ -95,11 +95,6 @@
             "type": "command",
             "command": "$HOME/Developer/claude-code-setup/hooks/note-pick-text.sh",
             "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/note-inherited-fence.sh",
-            "timeout": 10
           }
         ]
       }
@@ -117,16 +112,6 @@
             "type": "command",
             "command": "$HOME/Developer/claude-code-setup/hooks/block-underived-measurement.sh",
             "timeout": 12
-          }
-        ]
-      },
-      {
-        "matcher": "Task|Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/note-inherited-fence.sh",
-            "timeout": 10
           }
         ]
       }
