@@ -106,6 +106,17 @@ case "$file_path" in
     ;;
 esac
 
+# Skip project memory. The repo describes what is; memory is where the why and
+# the provenance go — which surfaces Derek fitted by hand, which an agent
+# invented, what he said before it reached the tree — so it carries rationale
+# by design.
+case "$file_path" in
+  "$HOME"/.claude/projects/*/memory/*)
+    log_status "skipped_memory" "$(jq -nc --arg file "$file_path" '{file: $file}')"
+    exit 0
+    ;;
+esac
+
 # Skip binary / structured files where residue-prevention doesn't apply.
 case "$file_path" in
   *.dxf|*.png|*.jpg|*.jpeg|*.gif|*.svg|*.pdf|*.bin|*.zip|*.tar|*.gz|*.3mf|*.stl|*.obj|*.json|*.lock|*.toml|*.yaml|*.yml)

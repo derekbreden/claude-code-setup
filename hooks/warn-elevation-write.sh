@@ -7,7 +7,8 @@
 #
 # Covers Write / Edit / MultiEdit -> tool_input.file_path (NotebookEdit has no
 # business at this elevation but rides the same matcher harmlessly). Bash is
-# intentionally NOT covered, same reasoning as block-memory-write.sh.
+# intentionally NOT covered: no agent has written here that way, and adding
+# Bash to the matcher would put the hook on every shell command.
 
 set -euo pipefail
 

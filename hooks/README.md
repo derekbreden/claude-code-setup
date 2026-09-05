@@ -1,6 +1,6 @@
 # claude-code-hooks
 
-Claude Code hooks. Five Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question, a turn that ends by offering work the agent could have done, and parameter sweeps reported as a finding — the fourth also wired on SubagentStop, so a subagent's final report meets it before a manager reads it. Three PreToolUse hooks block specific writes: project memory files, content containing residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). A fourth PreToolUse hook runs on `Bash` and blocks branch creation, so work stays on `main` in the one shared worktree; a fifth, also on `Bash`, nudges once per session against flashing firmware with a dirty tree, so flashed binaries map to commits by default. A sixth runs on `WebFetch` and `WebSearch` and denies the first call of each (per tool, per session) with a redirect to Chrome MCP, which is far more reliable. Two hooks inject context instead of blocking: when a prompt carries step-viewer pick text, one points the agent (once per session) at the format's home and at the fact the channel is two-way; when a subagent report or task notification arrives carrying a limit claim, the other names it (once per session) as an inherited fence to probe before relaying.
+Claude Code hooks. Five Stop hooks block specific outputs from the assistant: effort estimates, hedges that don't name a concern, disagreement framed as a question, a turn that ends by offering work the agent could have done, and parameter sweeps reported as a finding — the fourth also wired on SubagentStop, so a subagent's final report meets it before a manager reads it. Two PreToolUse hooks block specific writes: content containing residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). A third PreToolUse hook runs on `Bash` and blocks branch creation, so work stays on `main` in the one shared worktree; a fourth, also on `Bash`, nudges once per session against flashing firmware with a dirty tree, so flashed binaries map to commits by default. A fifth runs on `WebFetch` and `WebSearch` and denies the first call of each (per tool, per session) with a redirect to Chrome MCP, which is far more reliable. Two hooks inject context instead of blocking: when a prompt carries step-viewer pick text, one points the agent (once per session) at the format's home and at the fact the channel is two-way; when a subagent report or task notification arrives carrying a limit claim, the other names it (once per session) as an inherited fence to probe before relaying.
 
 This is a personal tool, put on GitHub in case it helps someone running similar configurations. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
 
@@ -38,8 +38,6 @@ The message they judge comes from **`_last_assistant_text.py`**, and getting it 
 ### PreToolUse hooks
 
 These run before specific tool calls.
-
-- **`block-memory-write.sh`** — catches `Write` / `Edit` / `MultiEdit` / `NotebookEdit` calls whose target path is under any `~/.claude/projects/*/memory/` directory. The deny message asks the assistant to encode the lesson by example in the work it's doing rather than as a memory note. (`Bash` writes to memory paths via `echo >` are intentionally not blocked — the hook would otherwise gate every shell command for a threat that hasn't materialized.)
 
 - **`block-residue.sh`** — catches `Write` / `Edit` / `MultiEdit` / `NotebookEdit` calls whose new content contains residue (justification, defense, decision narrative — the author going beyond describing what is). Two-stage like the Stop hooks: regex pre-filter on the new content, Haiku adjudication on a ±600-char window around the first match. The deny message points the assistant at three calibration files in `~/Developer/homesodamachine/calibration/` — `Principle.md` and the two conversations it distills, `principle/You.md` and `principle/Framing.md` — and asks them to read those before looking at what they wrote. **Fires once per session, not twice** — once an agent has been pointed at the calibration, subsequent residue writes in the same session pass through. A marker file at `~/.claude/hooks/state/residue-warned-<session-id>` records the warning; markers older than 7 days are garbage-collected on each invocation. Skips binary/structured files (`.dxf`, `.json`, `.yaml`, etc.) and the calibration files themselves. Fires only when the calibration files exist at the expected path; bails silently otherwise.
 
@@ -101,7 +99,7 @@ grep regex_no_match ~/.claude/hooks/logs/effort-estimate.jsonl | tail
 
 Identify the shape that got past, add it to the regex pattern in the script.
 
-`block-memory-write.sh`, `block-web.sh`, and `note-pick-text.sh` do not log. They are structurally much simpler (a path comparison and a tool-name match, respectively) and have no two-stage decision to diagnose.
+`block-web.sh` and `note-pick-text.sh` do not log. They are structurally much simpler (a tool-name match and a prompt-text match, respectively) and have no two-stage decision to diagnose.
 
 ## Installing
 
@@ -126,7 +124,6 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 - `hooks/block-effort-estimate.sh` — effort-estimate hook (Stop, regex + Haiku two-stage)
 - `hooks/block-unexplained-hedge.sh` — hedge hook (Stop, regex + Haiku two-stage)
 - `hooks/block-question-as-disagreement.sh` — question-as-disagreement hook (Stop, regex + Haiku two-stage)
-- `hooks/block-memory-write.sh` — memory-write hook (PreToolUse, path comparison only)
 - `hooks/block-residue.sh` — residue hook (PreToolUse, regex + Haiku two-stage)
 - `hooks/block-underived-measurement.sh` — underived-measurement hook (PreToolUse, regex + Haiku two-stage)
 - `hooks/block-branch.sh` — branch-creation hook (PreToolUse on Bash, command-pattern match)
@@ -135,4 +132,4 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 - `hooks/note-pick-text.sh` — step-viewer pick-text note (UserPromptSubmit, once-per-session context injection)
 - `hooks/note-inherited-fence.sh` — inherited-fence note (PostToolUse on Task|Agent + UserPromptSubmit on task-notification turns, once-per-session context injection)
 - `hooks/reap-abandoned-forks.sh` — abandoned-fork reaper (SessionStart, argv shape + age + cpu + ancestor chain, no Haiku stage)
-- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring all fifteen hooks
+- `examples/settings.json` — example `~/.claude/settings.json` snippet wiring the hooks

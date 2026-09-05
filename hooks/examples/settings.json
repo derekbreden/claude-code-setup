@@ -6,10 +6,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/block-memory-write.sh"
-          },
-          {
-            "type": "command",
             "command": "$HOME/.claude/hooks/block-residue.sh"
           },
           {
