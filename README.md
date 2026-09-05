@@ -7,7 +7,7 @@ send a message into the other. One `install.sh` wires it all into both clients.
 
 | Folder | What it is | How it reaches the client |
 | --- | --- | --- |
-| `hooks/` | Bash guardrail hooks (Stop, PreToolUse, PostToolUse, UserPromptSubmit, SessionStart) — effort estimates, unexplained hedges, residue, abandoned forks, etc. | referenced by absolute path from `~/.claude/settings.json` |
+| `hooks/` | Bash guardrail hooks (Stop, SubagentStop, PreToolUse, PostToolUse, UserPromptSubmit, SessionStart) — effort estimates, unwatched waits, residue, the relay inbox, abandoned forks, etc. | referenced by absolute path from `~/.claude/settings.json` |
 | `jsonl2md/` | Session export, the cross-runtime `board`/`send` verbs, `delta`/`watch`, and the `/relay` + `/relay-send` commands (`commands/`, doc in `SALON.md`) | `jsonl2md.py` is a CLI; `commands/*.md` are symlinked into `~/.claude/commands/` |
 | `codex/` | The Codex `relay` skill: read either runtime's transcript, send into either runtime | symlinked into `~/.codex/skills/relay/` |
 

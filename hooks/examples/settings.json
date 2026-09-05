@@ -2,15 +2,22 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/Developer/claude-code-setup/hooks/deliver-relay-message.sh",
+            "timeout": 10
+          }
+        ]
+      },
+      {
         "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/block-residue.sh"
-          },
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/block-underived-measurement.sh"
+            "command": "$HOME/Developer/claude-code-setup/hooks/warn-elevation-write.sh",
+            "timeout": 10
           }
         ]
       },
@@ -19,11 +26,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/block-branch.sh"
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-branch.sh",
+            "timeout": 10
           },
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/block-flash-before-commit.sh"
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-flash-before-commit.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-no-ignore.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-publish-below-floor.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-task-sleep-poll.sh"
           }
         ]
       },
@@ -32,7 +55,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/block-web.sh"
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-web.sh",
+            "timeout": 10
           }
         ]
       }
@@ -42,28 +66,24 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/block-effort-estimate.sh"
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-effort-estimate.sh",
+            "timeout": 6
           },
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/block-unexplained-hedge.sh"
-          },
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/block-question-as-disagreement.sh"
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-unwatched-wait.sh",
+            "timeout": 8
           }
         ]
       }
     ],
-    "SubagentStop": [],
-    "PostToolUse": [
+    "SubagentStop": [
       {
-        "matcher": "Task|Agent",
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/note-inherited-fence.sh",
-            "timeout": 10
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-unwatched-wait.sh",
+            "timeout": 8
           }
         ]
       }
@@ -73,11 +93,40 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/note-pick-text.sh"
+            "command": "$HOME/Developer/claude-code-setup/hooks/note-pick-text.sh",
+            "timeout": 10
           },
           {
             "type": "command",
-            "command": "$HOME/.claude/hooks/note-inherited-fence.sh"
+            "command": "$HOME/Developer/claude-code-setup/hooks/note-inherited-fence.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-residue.sh",
+            "timeout": 70
+          },
+          {
+            "type": "command",
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-underived-measurement.sh",
+            "timeout": 12
+          }
+        ]
+      },
+      {
+        "matcher": "Task|Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/Developer/claude-code-setup/hooks/note-inherited-fence.sh",
+            "timeout": 10
           }
         ]
       }
