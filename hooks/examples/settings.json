@@ -68,22 +68,6 @@
             "type": "command",
             "command": "$HOME/Developer/claude-code-setup/hooks/block-effort-estimate.sh",
             "timeout": 6
-          },
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/block-unwatched-wait.sh",
-            "timeout": 8
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/block-unwatched-wait.sh",
-            "timeout": 8
           }
         ]
       }

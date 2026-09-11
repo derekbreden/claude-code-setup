@@ -27,7 +27,6 @@ The message these judge comes from **`_last_assistant_text.py`**, and getting it
 
 - **`block-effort-estimate.sh`** — Stop. Catches phrasings like "this'll take a day", "maybe a few hours", "weeks not months", "a couple of weeks". An effort estimate from an LLM is not tied to reality: it is pattern-matched from training data, where humans wrote estimates of work they were doing — work the LLM will do entirely differently. Two-stage: a regex pre-filter, then Haiku on a ±800-char window around the match. The block message asks the assistant to rewrite without one.
 
-- **`block-unwatched-wait.sh`** — Stop and SubagentStop. Refuses a stop whose final message says it is holding, parked, or waiting for a job to report, when none of the background jobs this transcript launched is still alive. Nothing wakes a stopped agent except a job exiting, and from inside the agent a dead job and a slow one are the same silence; one night's fleet produced the false wait five times across two agents, each ending in a manager reading the observable state and sending a wake-up. The regex gates a process check, and there is no API call: a running background shell holds its own `tasks/<id>.output` open on fd 1 and 2, so a live `sleep` shows handles on it and a finished job shows none, read per job id named in the transcript. What passes: a wait on a person; a live subagent, seen by its JSONL's write recency; a tasks directory the hook cannot find; anything the regex does not match.
 
 ### PostToolUse
 
@@ -88,7 +87,7 @@ The staging keeps API cost down (most events never reach a model) while keeping 
 
 ## Logging
 
-`block-effort-estimate.sh`, `block-unwatched-wait.sh`, `block-residue.sh`, `block-underived-measurement.sh`, `reap-abandoned-forks.sh`, and the unwired `block-question-as-disagreement.sh` and `note-inherited-fence.sh` each append one JSONL line per event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
+`block-effort-estimate.sh`, `block-residue.sh`, `block-underived-measurement.sh`, `reap-abandoned-forks.sh`, and the unwired `block-question-as-disagreement.sh` and `note-inherited-fence.sh` each append one JSONL line per event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
 
 - `loop_guard` — re-entry from a revision attempt, skipped (Stop hooks)
 - `no_transcript` / `no_assistant_message` / `empty_or_short_text` / `empty_text` / `empty_after_strip` / `window_empty` — nothing to check (Stop hooks)
@@ -136,7 +135,6 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 
 - `hooks/_last_assistant_text.py` — the turn's final text, waited for (shared by the Stop hooks)
 - `hooks/block-effort-estimate.sh` — effort-estimate hook (Stop, regex + Haiku two-stage)
-- `hooks/block-unwatched-wait.sh` — unwatched-wait hook (Stop + SubagentStop, regex + process check)
 - `hooks/block-residue.sh` — residue note (PostToolUse on writes, regex + Haiku + Opus three-stage)
 - `hooks/block-underived-measurement.sh` — underived-measurement note (PostToolUse on writes, regex + Haiku two-stage)
 - `hooks/deliver-relay-message.sh` — relay inbox delivery (PreToolUse on every tool, mailbox drain)
