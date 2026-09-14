@@ -13,8 +13,9 @@ Send a message into another of the user's agents. Request: **$ARGUMENTS**
    `mcp__codex_app__send_message_to_thread`. The script redirects same-runtime callers to
    these tools without sending anything. A Claude session in the cloud, or on another
    machine, is a Claude peer too: the board prints its address (`bridge:session_…`) and
-   `SendMessage` takes it verbatim. Such a session cannot reply here; read its answer with
-   `/relay` or `jsonl2md.py delta "<title>"`.
+   `SendMessage` takes it verbatim. Such a session answers with a `<relay to="…">` mark in its
+   own reply, which the cloud-inbox watcher delivers to you as a peer message; the message you
+   send already tells it so.
 3. For cross-runtime delivery, run:
 
    ```sh

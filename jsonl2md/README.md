@@ -64,10 +64,17 @@ session that is not on this machine — running in the cloud, or bridged from an
 through Remote Control — takes one cross-session event posted to its cloud record, the request
 the CLI's own `SendMessage` makes; a Claude caller is handed that tool's address
 (`bridge:session_…`) instead. Messages carry a sender label and UTC send time. Add a return
-address when an answer is needed; a cloud session cannot answer through the relay, so its
-reply is read from its own transcript with `delta`. `--from-mode` asserts the sender's
-permission class (default `bypass`): a receiver delivers a peer message unasked only when the
-classes match, and holds it for its user otherwise.
+address when an answer is needed. `--from-mode` asserts the sender's permission class (default
+`bypass`): a receiver delivers a peer message unasked only when the classes match, and holds
+it for its user otherwise.
+
+A cloud session cannot post back — the server accepts its credential for its own work only —
+so its way back is a mark in its own reply, `<relay to="Time">…</relay>`, and the `cloud-inbox`
+verb: a watcher that tails every live cloud session and delivers each mark into the named local
+session (or Codex task) over the same transport a local `send` uses. A name that matches nothing
+is answered in place with the names that do. `install.sh` keeps it running as a LaunchAgent
+(`~/.jsonl2md/cloud/inbox.log`); every message sent to a cloud session tells it the mark, and a
+project skill covers a cloud session that speaks first.
 
 The target must be open in its running runtime. Unavailable receivers return a delivery error; an
 uncertain submission exits 2 and must be checked before retrying. Accepted input is not a read

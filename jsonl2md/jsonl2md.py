@@ -2196,6 +2196,17 @@ def _caller_bridge_address():
     return None
 
 
+def cloud_way_back(sender):
+    """What a cloud session is told about answering: SendMessage will not carry
+    it, a mark in its own reply will. Appended to every message sent there."""
+    name = sender or "<the session name you were given>"
+    return ("\nYou are a cloud session and cannot message back through SendMessage. To answer, "
+            f"or to reach any session on Derek's Mac, write this in your reply and end your turn:\n"
+            f'<relay to="{name}">\nyour message\n</relay>\n'
+            "A watcher on that Mac delivers it within seconds; the answer arrives here as a "
+            "cross-session message.\n")
+
+
 def _send_cloud(args, target):
     """A session in the cloud or on another machine: one event posted to its
     cloud record, or the native tool when the caller has one."""
@@ -2215,11 +2226,7 @@ def _send_cloud(args, target):
         token = _cloud_token()
     except TranscriptError as exc:
         return _delivery_failed(target, DeliveryError(f"no cloud grant: {exc}"))
-    reply_label = _label_for_id(args.reply_to, args.cwd) if args.reply_to else None
-    text = codex_envelope(args.text, args.sender, None, None)
-    if args.reply_to:
-        text += (f"\nReply to {reply_label or args.reply_to}: you are not on the sender's machine, "
-                 "so answer in your own transcript; the sender reads it from there.\n")
+    text = codex_envelope(args.text, args.sender, None, None) + cloud_way_back(args.sender)
     try:
         receipt = send_cloud(cse_id, text, args.sender, token=token, org_uuid=_org_uuid(),
                              mode=args.from_mode, from_address=_caller_bridge_address())
@@ -2358,6 +2365,11 @@ examples:
   # is handed the native address; anyone else posts to its cloud record.
   jsonl2md.py send "Ceiling panel" "The 3 mm floor is the limit; see grip-roof-shared-datum" --from "Tower"
   jsonl2md.py delta "Ceiling panel" --tail 2      # its answer is in its own transcript
+
+  # The way back: a cloud session writes <relay to="Time">…</relay> in its reply and
+  # this watcher (kept alive by launchd, see install.sh) delivers it into Time.
+  jsonl2md.py cloud-inbox
+  jsonl2md.py cloud-inbox --session cse_… --once   # one pass over one record
   jsonl2md.py await-reply "My Session Title" --timeout 300  # legacy only, in background
 
   # Standalone: any Claude Code .jsonl on disk
@@ -2367,6 +2379,21 @@ examples:
 
 
 # --- selftest ----------------------------------------------------------------
+
+def cmd_cloud_inbox(args):
+    """Tail live cloud sessions and deliver their `<relay to=…>` marks locally."""
+    from cloud_inbox import Inbox
+    inbox = Inbox(interval=args.interval, only=args.session or None, cwd=args.cwd)
+    if args.once:
+        n = inbox.pass_once()
+        sys.stderr.write(f"[inbox] one pass: {n} delivered\n")
+        return 0
+    try:
+        inbox.run()
+    except KeyboardInterrupt:
+        sys.stderr.write("\n[inbox] stopped.\n")
+    return 0
+
 
 def cmd_selftest(args):
     """Check speech, session exclusion, and message routing without live delivery."""
@@ -2743,6 +2770,20 @@ def main():
                         help="--defer lifetime, 0 < seconds <= 86400 (default: 300)")
     p_send.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
     p_send.set_defaults(func=cmd_send)
+
+    p_inbox = sub.add_parser(
+        "cloud-inbox",
+        help="deliver <relay to=…> marks from live cloud sessions into local sessions (daemon)",
+        epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_inbox.add_argument("--interval", type=float, default=4.0, help="poll seconds (default: 4)")
+    p_inbox.add_argument("--session", action="append", metavar="CSE_ID",
+                         help="watch exactly this cloud record (repeatable; default: every live "
+                              "session on Anthropic's machines)")
+    p_inbox.add_argument("--once", action="store_true", help="one pass, then exit")
+    p_inbox.add_argument("--cwd", default=DEFAULT_CWD, help=f"project for Codex targets (default: {DEFAULT_CWD})")
+    p_inbox.set_defaults(func=cmd_cloud_inbox)
 
     p_await = sub.add_parser(
         "await-reply",

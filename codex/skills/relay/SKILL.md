@@ -76,8 +76,9 @@ Choose the first available route that reaches the resolved target:
   wakes an idle session. The target must be open in its running desktop runtime.
 - **A Claude session in the cloud, or on another machine:** the same script verb. The board
   lists it with what it is; the script posts the message to its cloud record, the way the
-  CLI's own peer messaging does. It cannot answer you through the relay: read its reply in
-  its own transcript with `delta`.
+  CLI's own peer messaging does. A cloud session answers with a `<relay to="<your title>">`
+  mark in its reply, which the cloud-inbox watcher on this Mac delivers into your task; the
+  message you send already tells it so.
 
 ```sh
 python3 $J send "<exact title>" "<message>" --from "<your own task name>"

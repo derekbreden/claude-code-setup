@@ -44,6 +44,7 @@ transport from the runtime it lands in:
 | --- | --- | --- |
 | Claude session on this machine | its native peer socket (`~/.claude/sessions/<pid>.json`) | now: it wakes an idle session |
 | Claude session in the cloud, or on another machine | one cross-session event posted to its cloud record, the request the CLI's own `SendMessage` makes | now, through Anthropic's servers |
+| a cloud session → any session here | a `<relay to="name">…</relay>` mark in its own reply; `cloud-inbox`, a launchd agent, tails every live cloud session and delivers the mark over the peer socket | within the poll interval, a few seconds |
 | Codex task | the desktop app's IPC: steer the active turn, or start one | now |
 
 A handful of titles exist in *both* rosters — "Manager", "Build", "Relay". `send` refuses
@@ -112,12 +113,15 @@ to open or close; running the command *is* the act of routing.
 - **`codex queue` needs the Codex app-server daemon up.** A Claude mailbox is a file and
   keeps until the target next acts; a Codex message goes through the running daemon, and
   `send` fails loud rather than silently dropping it when that is not there.
-- A **cloud session cannot answer through the relay**. `send` reaches it (a Claude caller is
-  handed the native address, `SendMessage to: bridge:session_…`; anyone else posts the same
-  event to its cloud record), but a session on Anthropic's machines cannot message any
-  session back yet, and one on another computer has no relay to run. Its answer is in its
-  own transcript: `delta` or `watch` it. A session that has switched cross-session messages
-  off is listed as refusing them, and the post fails loud.
+- A **cloud session cannot post back**: the server accepts its credential for its own work
+  only. `send` reaches it (a Claude caller is handed the native address,
+  `SendMessage to: bridge:session_…`; anyone else posts the same event to its cloud record),
+  and the way back is the mark: a `<relay to="name">` block in its reply, which the
+  `cloud-inbox` watcher delivers into the named local session within seconds. Every message
+  sent to a cloud session says so, and the homesodamachine repo carries the `relay-poke`
+  skill for a cloud session that starts the conversation. A session on another computer needs
+  none of this: it has SendMessage of its own. A session that has switched cross-session
+  messages off is listed as refusing them, and the post fails loud.
 - Cloud sessions are matched to a project by **git remote**, since a cloud worker has no
   working directory — two checkouts of one repo see the same cloud sessions. A session
   bridged from another computer is listed the same way, when it is connected.
