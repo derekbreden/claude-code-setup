@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import cloud_inbox
 import jsonl2md as relay
-from cloud_inbox import (Inbox, InboxState, event_time, find_pokes, find_reads, find_tool_marks,
+from cloud_inbox import (Inbox, InboxState, event_time, find_output_marks, find_pokes, find_reads, find_tool_marks,
                          poke_text, resolve_local, resolve_transcript, split_parts)
 from live_relay import DeliveryError
 
@@ -84,11 +84,14 @@ class PollTests(unittest.TestCase):
         self.state = InboxState(os.path.join(self.tmp.name, "inbox.json"))
         self.log = []
         self.sent = []
+        self.sent_modes = []
         self.bounced = []
+        self.post_modes = []
         self.events = {}
         self.heads = {}
         self.sessions = [{"id": "cse_A", "title": "Ceiling panel", "environment_kind": "anthropic_cloud",
-                          "status": "active", "worker_status": "idle"},
+                          "status": "active", "worker_status": "idle",
+                          "session_context": {"permission_mode": "auto"}},
                          {"id": "cse_B", "title": "Time", "environment_kind": "bridge",
                           "status": "active", "worker_status": "idle", "connection_status": "connected"}]
         patches = [
@@ -109,14 +112,16 @@ class PollTests(unittest.TestCase):
     def fetch(self, cse, after=None):
         return [e for e in self.events.get(cse, []) if int(e["sequence_num"]) > int(after)]
 
-    def record_claude(self, peer, text, sender, root):
+    def record_claude(self, peer, text, sender, root, mode=None):
         self.sent.append((peer["name"], sender, text))
+        self.sent_modes.append(mode)
         if peer["name"] == "Broken":
             raise DeliveryError("socket closed")
         return {"status": "submitted"}
 
     def record_bounce(self, cse, note, sender, **kw):
         self.bounced.append((cse, note))
+        self.post_modes.append(kw.get("mode"))
         return {"status": "posted"}
 
     def resolve(self, name, cwd):
@@ -126,6 +131,12 @@ class PollTests(unittest.TestCase):
     def event(self, seq, text, uuid, created_at="1970-01-01T00:00:00.000000Z", blocks=()):
         return {"event_type": "assistant", "sequence_num": str(seq), "event_id": f"e{seq}",
                 "created_at": created_at, "payload": assistant(text, uuid=uuid, extra_blocks=blocks)}
+
+    def result_event(self, seq, tool_id, text, uuid, created_at="1970-01-01T00:00:00.000000Z"):
+        """What a tool printed, as the user record that carries it back."""
+        return {"event_type": "user", "sequence_num": str(seq), "event_id": f"e{seq}", "created_at": created_at,
+                "payload": {"type": "user", "uuid": uuid, "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}}
 
     def test_first_sight_starts_at_head_then_delivers_once(self):
         self.heads["cse_A"] = "10"
@@ -227,14 +238,66 @@ class TimingPollTests(PollTests):
         self.assertEqual(self.inbox.pass_once(), 1)
         self.assertIn("sent 1970-01-01 00:01:00 UTC", self.sent[0][2])
 
-    def test_tool_call_mark_is_delivered(self):
+    def test_tool_call_mark_waits_for_its_result_then_delivers_once(self):
         self.heads["cse_A"] = "1"
         self.inbox.pass_once()
         self.events["cse_A"] = [self.event(2, "working", "tc1", blocks=[
-            {"type": "tool_use", "name": "Bash", "input": {"command": 'tools/relay-mark to "Time" "mid-turn ask"'}}])]
+            {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": 'tools/relay-mark to "Time" "mid-turn ask"'}}])]
+        self.assertEqual(self.inbox.pass_once(), 0)          # held until the call's result arrives
+        self.assertEqual(self.sent, [])
+        # An older script printed no mark: the command's own reading stands in.
+        self.events["cse_A"].append(self.result_event(3, "tu1", 'mark recorded: <relay to="Time"> (12 chars).', "tr1"))
         self.assertEqual(self.inbox.pass_once(), 1)
         self.assertEqual(self.sent[0][0], "Time")
         self.assertIn("\nmid-turn ask\n", self.sent[0][2])
+        self.assertEqual(self.inbox.pass_once(), 0)          # once
+        self.assertEqual(self.inbox.pending, {})
+
+    def test_the_printed_mark_is_the_mark(self):
+        self.heads["cse_A"] = "1"
+        self.inbox.pass_once()
+        self.events["cse_A"] = [
+            self.event(2, "working", "tc2", blocks=[{"type": "tool_use", "id": "tu2", "name": "Bash",
+                "input": {"command": 'tools/relay-mark to "Time" "$(cat /tmp/note.txt)"'}}]),
+            self.result_event(3, "tu2", 'relay-mark: <relay to="Time">\nthe file\'s words\n</relay>\nThe watcher reads it.', "tr2")]
+        self.assertEqual(self.inbox.pass_once(), 1)
+        self.assertIn("\nthe file's words\n", self.sent[0][2])
+        self.assertNotIn("$(cat", self.sent[0][2])
+        # A heredoc-fed call parses as no command mark at all, and the printed mark still lands.
+        self.events["cse_A"] += [
+            self.event(4, "working", "tc3", blocks=[{"type": "tool_use", "id": "tu3", "name": "Bash",
+                "input": {"command": "tools/relay-mark to \"Time\" \"$(cat <<'EOF'\nfrom a heredoc\nEOF\n)\""}}]),
+            self.result_event(5, "tu3", 'relay-mark: <relay to="Time">\nfrom a heredoc\n</relay>', "tr3")]
+        self.assertEqual(self.inbox.pass_once(), 1)
+        self.assertIn("\nfrom a heredoc\n", self.sent[1][2])
+
+    def test_a_quoted_mark_in_other_output_is_not_a_mark(self):
+        self.heads["cse_A"] = "1"
+        self.inbox.pass_once()
+        self.events["cse_A"] = [self.result_event(
+            2, "tu9", 'usage:\n  <relay to="Time">no</relay>\n  relay-mark: <relay to="Time">indented, no</relay>', "tr9")]
+        self.assertEqual(self.inbox.pass_once(), 0)
+        self.assertEqual(self.sent, [])
+
+    def test_output_marks_parse(self):
+        self.assertEqual(find_output_marks('relay-mark: <relay read="Time" tail="12"/>\nnote'), ([], [("Time", 12, 1)]))
+        self.assertEqual(find_output_marks('x\nrelay-mark: <relay to="A">\n b \n</relay>\nrelay-mark: <relay to="C">d</relay>'),
+                         ([("A", "b"), ("C", "d")], []))
+        self.assertEqual(find_output_marks("relay-mark: nothing here"), ([], []))
+        self.assertEqual(find_output_marks(None), ([], []))
+
+    def test_posts_assert_the_receivers_class(self):
+        self.heads["cse_A"] = "1"
+        self.inbox.pass_once()
+        self.events["cse_A"] = [self.event(2, '<relay to="Nobody">x</relay>', "m1"),
+                                self.event(3, '<relay to="Time">y</relay>', "m2")]
+        self.inbox.pass_once()
+        self.assertEqual(self.post_modes, ["prompting"])   # the record runs in auto: a prompting receiver
+        self.assertEqual(self.sent_modes, ["bypass"])      # a session on this Mac runs without asking
+        self.sessions[0]["session_context"] = {"permission_mode": "bypassPermissions"}
+        self.events["cse_A"].append(self.event(4, '<relay to="Nobody">z</relay>', "m3"))
+        self.inbox.pass_once()
+        self.assertEqual(self.post_modes[-1], "bypass")
 
     def test_young_session_is_read_from_its_start(self):
         self.inbox.clock = lambda: 1000

@@ -25,6 +25,14 @@ reach.
 A name that does not resolve is answered in place: a notice is posted into the
 cloud session naming the sessions that are live, so the agent there can
 address one of them instead of waiting for an answer that will never come.
+
+EVERY POST SAYS WHICH CLASS THE RECEIVER IS. The CLI delivers a peer message
+unasked only when the sender asserts the receiver's own permission class --
+`bypass` for a session in bypassPermissions, `prompting` for auto and every
+other mode -- and otherwise holds it for the user, out of the agent's sight.
+A cloud record carries the mode its session runs in and that is what is
+asserted toward it; a session on this Mac runs without asking and gets
+`bypass`.
 """
 
 import glob
@@ -42,7 +50,8 @@ from email.utils import parsedate_to_datetime
 from urllib.parse import quote, urlsplit
 
 import jsonl2md as relay
-from live_relay import CLOUD_API, CLOUD_UA, DeliveryError, send_claude, send_cloud, send_codex
+from live_relay import (CLOUD_API, CLOUD_UA, DeliveryError, receiver_mode, send_claude, send_cloud,
+                        send_codex)
 
 TAG_RE = re.compile(
     r"""<relay\s+to=(["'])([^"'<>\n]{1,120})\1\s*>[ \t]*\r?\n?(.*?)\r?\n?[ \t]*</relay\s*>""",
@@ -59,6 +68,8 @@ MARK_EXPIRY = 600          # a mark older than this at first sight is bounced, n
 BACKFILL_WINDOW = 600      # a session this young is read from its first event, not its head
 ROSTER_TTL = 10            # how stale the cloud session list may be between passes
 SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+PENDING_TTL = 900          # a relay-mark call whose result never arrives is forgotten after this
+OUTPUT_SENTINEL = "relay-mark: "   # what the script prints before its mark, at the start of a line
 STREAM_LIVENESS = 45       # the CLI's own rule: a stream silent this long is dead
 STREAM_CONNECT = 30
 STREAM_BACKOFF_MAX = 30
@@ -107,15 +118,21 @@ def find_reads(record):
     return out
 
 
-def find_tool_marks(record):
-    """Marks carried by a `relay-mark` tool call: `(pokes, reads)`.
+def find_tool_mark_blocks(record):
+    """`[(tool_use_id, pokes, reads)]` for each `relay-mark` call an assistant
+    record makes, read off the command as written.
 
     Text between tool calls is not always recorded, but a tool call is, the
     moment it runs -- so `tools/relay-mark to "Time" "..."` in a Bash call is
-    a mark that need not wait for the turn to end."""
-    pokes, reads = [], []
+    a mark that need not wait for the turn to end. What is read here is the
+    command before the shell saw it: a `$(cat file)` is those six characters,
+    not the file. So the watcher holds this reading until the call's result
+    arrives and prefers the mark the script printed (`find_output_marks`),
+    which the shell had already expanded; the command's own reading stands in
+    only for a script that printed no mark."""
+    out = []
     if record.get("type") != "assistant":
-        return pokes, reads
+        return out
     content = (record.get("message") or {}).get("content")
     for block in content or [] if isinstance(content, list) else []:
         if not isinstance(block, dict) or block.get("type") != "tool_use":
@@ -129,6 +146,7 @@ def find_tool_marks(record):
             tokens = list(lexer)
         except ValueError:
             continue
+        pokes, reads = [], []
         i = 0
         while i < len(tokens):
             # An invocation opens a command: first token, or first after an operator.
@@ -146,7 +164,55 @@ def find_tool_marks(record):
             elif len(args) >= 2 and args[0] == "read" and args[1].strip():
                 tail = int(args[2]) if len(args) >= 3 and args[2].isdigit() else READ_TAIL
                 reads.append((args[1].strip(), tail, READ_COMPACT))
+        if pokes or reads:
+            out.append((block.get("id"), pokes, reads))
+    return out
+
+
+def find_tool_marks(record):
+    """Marks carried by a record's `relay-mark` calls, all together: `(pokes, reads)`."""
+    pokes, reads = [], []
+    for _, p, r in find_tool_mark_blocks(record):
+        pokes += p
+        reads += r
     return pokes, reads
+
+
+def find_output_marks(text):
+    """`(pokes, reads)` the `relay-mark` script printed: a mark on the line
+    after `relay-mark: `, which is the script's own output and so already
+    through the shell -- a `$(cat file)` is the file's words here. A mark
+    anywhere else in a tool's output, a file that quotes one, is not a mark."""
+    pokes, reads = [], []
+    for m in re.finditer(r"(?m)^" + re.escape(OUTPUT_SENTINEL) + r"(?=<relay\b)", text or ""):
+        rest = text[m.end():]
+        t = TAG_RE.match(rest)
+        if t:
+            body = t.group(3).strip()
+            if body:
+                pokes.append((t.group(2).strip(), body))
+            continue
+        r = READ_RE.match(rest)
+        if r:
+            opts = {k: int(v) for k, v in READ_OPT_RE.findall(r.group(3) or "")}
+            reads.append((r.group(2).strip(), opts.get("tail", READ_TAIL), opts.get("compact", READ_COMPACT)))
+    return pokes, reads
+
+
+def tool_results(record):
+    """`[(tool_use_id, text)]` for the tool results a user record carries."""
+    if record.get("type") != "user":
+        return []
+    content = (record.get("message") or {}).get("content")
+    out = []
+    for block in content or [] if isinstance(content, list) else []:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        c = block.get("content")
+        text = c if isinstance(c, str) else "\n".join(
+            x.get("text") or "" for x in (c or []) if isinstance(x, dict) and x.get("type") == "text")
+        out.append((block.get("tool_use_id"), text))
+    return out
 
 
 def event_time(event):
@@ -451,6 +517,8 @@ class Inbox:
         self.grant_read_at = 0
         self.lock = threading.RLock()
         self.streams = {}
+        self.modes = {}      # cse_id -> the permission class its session holds messages against
+        self.pending = {}    # (cse_id, tool_use_id) -> (pokes, reads, event time, stashed at)
 
     # -- roster ---------------------------------------------------------------
     def watched(self):
@@ -466,6 +534,7 @@ class Inbox:
             sessions = []
         by_id = {s["id"]: s for s in sessions}
         def row(s, fallback_id=None):
+            self.modes[s.get("id") or fallback_id] = receiver_mode(s)
             return {"id": s.get("id") or fallback_id, "title": s.get("title") or s.get("id") or fallback_id,
                     "created": event_time({"created_at": s.get("created_at")})}
         if self.only:
@@ -508,21 +577,37 @@ class Inbox:
         return self.handle(cse_id, title, events)
 
     def handle(self, cse_id, title, events):
-        """Act on assistant events once each: marks in text, marks in tool calls."""
+        """Act on each event once. A mark in an assistant's own text is
+        delivered as found. A mark a `relay-mark` call carries is held until
+        the call's result arrives, then delivered from the mark the script
+        printed, which the shell had already expanded; the command's own
+        reading stands in only when the result carries no mark."""
         delivered = 0
         for e in events:
-            if e.get("event_type") != "assistant":
-                continue
+            kind = e.get("event_type")
             rec = e.get("payload") or {}
             uuid = rec.get("uuid") or e.get("event_id")
             if not uuid or self.state.seen(cse_id, uuid):
                 continue
-            tool_pokes, tool_reads = find_tool_marks(rec)
-            pokes, reads = find_pokes(rec) + tool_pokes, find_reads(rec) + tool_reads
+            when = event_time(e)
+            if kind == "assistant":
+                for tool_id, tool_pokes, tool_reads in find_tool_mark_blocks(rec):
+                    self.pending[(cse_id, tool_id)] = (tool_pokes, tool_reads, when, self.clock())
+                pokes, reads = find_pokes(rec), find_reads(rec)
+            elif kind == "user":
+                pokes, reads = [], []
+                for tool_id, text in tool_results(rec):
+                    stashed = self.pending.pop((cse_id, tool_id), None)
+                    out_pokes, out_reads = find_output_marks(text)
+                    if not out_pokes and not out_reads and stashed:
+                        out_pokes, out_reads = stashed[0], stashed[1]
+                    pokes += out_pokes
+                    reads += out_reads
+            else:
+                continue
             if not pokes and not reads:
                 continue
             self.state.mark(cse_id, uuid)
-            when = event_time(e)
             age = None if when is None else self.clock() - when
             if age is not None and age > MARK_EXPIRY:
                 for to, _ in pokes:
@@ -536,7 +621,24 @@ class Inbox:
                 delivered += self.deliver(cse_id, title, to, body, when)
             for name, tail, compact in reads:
                 delivered += self.read(cse_id, title, name, tail, compact)
+        now = self.clock()
+        for key in [k for k, v in self.pending.items() if now - v[3] > PENDING_TTL]:
+            del self.pending[key]
         return delivered
+
+    def mode_for(self, cse_id):
+        """The permission class the session behind `cse_id` holds a message
+        against, from its roster record; a record the roster has not shown is
+        taken for a cloud session, which asks before it acts."""
+        mode = self.modes.get(cse_id)
+        if mode is None:
+            try:
+                mode = receiver_mode(next((s for s in relay.cloud_sessions() if s.get("id") == cse_id),
+                                          {"environment_kind": "anthropic_cloud"}))
+            except Exception:
+                mode = "prompting"
+            self.modes[cse_id] = mode
+        return mode
 
     def read(self, cse_id, title, name, tail, compact):
         """Render a local transcript and post it into the cloud session, in
@@ -564,7 +666,8 @@ class Inbox:
                     f"{f', part {i} of {n}' if n > 1 else ''}. What was typed and what was answered; "
                     "tool calls and thinking are stripped.\n\n")
             try:
-                send_cloud(cse_id, head + part, "relay", token=self.token(), org_uuid=relay._org_uuid(), mode="bypass")
+                send_cloud(cse_id, head + part, "relay", token=self.token(), org_uuid=relay._org_uuid(),
+                           mode=self.mode_for(cse_id))
                 posted += 1
             except (DeliveryError, relay.TranscriptError, ValueError) as exc:
                 self.log(f"[inbox] read {found!r} for {cse_id}: part {i}/{n} failed: {exc}")
@@ -577,7 +680,9 @@ class Inbox:
         text = poke_text(body, title, cse_id, self.clock() if when is None else when)
         try:
             if kind == "claude":
-                send_claude(target, text, f"{title} (cloud)", relay.SESSIONS_ROOT)
+                # Every session on this Mac runs without asking, and holds a message that
+                # does not say so.
+                send_claude(target, text, f"{title} (cloud)", relay.SESSIONS_ROOT, mode="bypass")
             elif kind == "codex":
                 send_codex(target["id"], text, relay.CODEX_HOME)
             else:
@@ -597,7 +702,7 @@ class Inbox:
             note += f" {what}: {', '.join(names)}. Write the mark again with one of those names."
         try:
             send_cloud(cse_id, note, "relay", token=self.token(), org_uuid=relay._org_uuid(),
-                       mode="bypass")
+                       mode=self.mode_for(cse_id))
             self.log(f"[inbox] bounced {to!r} for {cse_id}: {reason}")
         except (DeliveryError, relay.TranscriptError, ValueError) as exc:
             self.log(f"[inbox] could not bounce {to!r} for {cse_id}: {exc}")

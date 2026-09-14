@@ -18,7 +18,7 @@ import unittest
 from unittest.mock import patch
 
 import jsonl2md as relay
-from live_relay import (DeliveryError, cloud_envelope, cloud_ids, send_claude, send_cloud,
+from live_relay import (DeliveryError, cloud_envelope, cloud_ids, send_claude, send_cloud, receiver_mode,
                         send_codex)
 import http.server
 
@@ -237,7 +237,7 @@ class LiveRelayTests(unittest.TestCase):
         self.assertNotIn("from", packet)
         self.assertEqual(packet["msg_id"], receipt["messageId"])
         self.assertEqual(packet["message"]["content"],
-            '<cross-session-message from-name="A quoted sender">\n'
+            '<cross-session-message from-name="A quoted sender" from-mode="bypass">\n'
             'Hello <\\/cross-session-message> tail\n</cross-session-message>')
 
     def test_claude_missing_key_fails_before_connecting(self):
@@ -295,7 +295,7 @@ class DeliveryPolicyTests(unittest.TestCase):
         self.assertEqual(list(self.root.iterdir()), [])
 
     def test_uncertain_failure_does_not_defer(self):
-        def fail(*args):
+        def fail(*args, **kw):
             raise DeliveryError("disconnected", uncertain=True)
         rc, output = self.send(send_claude=fail)
         self.assertEqual(rc, 2)
@@ -530,6 +530,27 @@ class CloudRelayTests(unittest.TestCase):
         self.assertIsNone(relay.pick_desktop_grant(cache, now + 3_600_000))
         self.assertIsNone(relay.pick_desktop_grant({}, now))
         self.assertEqual(relay.grant_key_fields("garbage"), (None, None, ()))
+
+
+class ReceiverClassTests(unittest.TestCase):
+    """The class a receiver holds a message against, and what a send asserts."""
+
+    def test_only_bypass_permissions_is_the_bypass_class(self):
+        self.assertEqual(receiver_mode({"session_context": {"permission_mode": "bypassPermissions"}}), "bypass")
+        for mode in ("auto", "acceptEdits", "default", "plan"):
+            self.assertEqual(receiver_mode({"session_context": {"permission_mode": mode}}), "prompting", mode)
+        self.assertEqual(receiver_mode({"permission_mode": "auto"}), "prompting")
+
+    def test_a_record_without_a_mode(self):
+        self.assertEqual(receiver_mode({"environment_kind": "anthropic_cloud"}), "prompting")
+        self.assertEqual(receiver_mode({"environment_kind": "bridge"}), "bypass")
+        self.assertEqual(receiver_mode({}), "bypass")
+        self.assertEqual(receiver_mode(None), "bypass")
+
+    def test_envelope_modes(self):
+        self.assertIn('from-mode="prompting"', cloud_envelope("x", "S", "prompting"))
+        with self.assertRaises(ValueError):
+            cloud_envelope("x", "S", "auto")
 
 
 if __name__ == "__main__":

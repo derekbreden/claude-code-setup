@@ -62,7 +62,7 @@ import uuid
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
-from live_relay import (DeliveryError, cloud_address, cloud_ids, send_claude, send_cloud,
+from live_relay import (DeliveryError, cloud_address, cloud_ids, receiver_mode, send_claude, send_cloud,
                         send_codex)
 
 DEFAULT_CWD = "/Users/derekbredensteiner/Developer/homesodamachine"
@@ -2210,6 +2210,17 @@ def cloud_way_back(sender):
             'tools/relay-mark to "name" "message" (or read "title" 40) in the homesodamachine checkout.\n')
 
 
+def _cloud_record(cse_id):
+    """The roster record for a cloud id, or nothing when the roster does not carry it."""
+    try:
+        for s in cloud_sessions():
+            if s.get("id") == cse_id:
+                return s
+    except TranscriptError:
+        pass
+    return {}
+
+
 def _send_cloud(args, target):
     """A session in the cloud or on another machine: one event posted to its
     cloud record, or the native tool when the caller has one."""
@@ -2230,15 +2241,16 @@ def _send_cloud(args, target):
     except TranscriptError as exc:
         return _delivery_failed(target, DeliveryError(f"no cloud grant: {exc}"))
     text = codex_envelope(args.text, args.sender, None, None) + cloud_way_back(args.sender)
+    mode = getattr(args, "from_mode", None) or receiver_mode(_cloud_record(cse_id))
     try:
         receipt = send_cloud(cse_id, text, args.sender, token=token, org_uuid=_org_uuid(),
-                             mode=args.from_mode, from_address=_caller_bridge_address())
+                             mode=mode, from_address=_caller_bridge_address())
     except (DeliveryError, ValueError) as exc:
         if not isinstance(exc, DeliveryError):
             exc = DeliveryError(str(exc))
         return _delivery_failed(target, exc)
     seq = f" (event {receipt['sequenceNum']})" if receipt.get("sequenceNum") else ""
-    sys.stderr.write(f"[relay] {label!r}: posted to its cloud record{seq}; agent reading is not "
+    sys.stderr.write(f"[relay] {label!r}: posted to its cloud record{seq} as {mode}; agent reading is not "
                      f"confirmed. Its answer lands in its own transcript: "
                      f"jsonl2md.py delta {shlex.quote(label)}\n")
     print(json.dumps(receipt))
@@ -2295,7 +2307,7 @@ def cmd_send(args):
             "or explicitly use --defer --expires-in 300 for its legacy mailbox"))
     text = codex_envelope(args.text, args.sender, args.reply_to, args.reply_to)
     try:
-        receipt = send_claude(peer, text, args.sender, SESSIONS_ROOT)
+        receipt = send_claude(peer, text, args.sender, SESSIONS_ROOT, mode=getattr(args, "from_mode", None) or "bypass")
     except DeliveryError as exc:
         return _delivery_failed(target, exc)
     sys.stderr.write(f"[relay] {label!r}: submitted to the live Claude receiver; "
@@ -2768,8 +2780,8 @@ def main():
                              "(default: resolve across both and fail loud on a collision)")
     p_send.add_argument("--force-relay", action="store_true",
                         help="use the live script transport instead of redirecting to a native tool")
-    p_send.add_argument("--from-mode", dest="from_mode", choices=["bypass", "prompting"], default="bypass",
-                        help="cloud targets: the permission class asserted for the sender; a receiver "
+    p_send.add_argument("--from-mode", dest="from_mode", choices=["bypass", "prompting"], default=None,
+                        help="the permission class to assert, which must be the RECEIVER's for it to deliver unasked: derived from its cloud record when omitted (bypass for a session on this Mac)"
                              "delivers unasked only from its own class (default: bypass)")
     p_send.add_argument("--defer", action="store_true",
                         help="explicitly use a legacy Claude mailbox instead of live delivery")

@@ -190,13 +190,18 @@ def _claude_auth(peer, sessions_root):
     return {"type": "auth", "token": token}
 
 
-def send_claude(peer, text, sender, sessions_root, *, timeout=5):
+def send_claude(peer, text, sender, sessions_root, *, mode="bypass", timeout=5):
     """Submit to the native peer receiver, whose enqueue callback wakes Claude.
 
     The receiver records the connecting process as the peer. `from-name` is a
     display label; no Claude process address or verified identity is impersonated.
-    The native write protocol has no synchronous read receipt.
+    `mode` is the receiver's own permission class, asserted as `from-mode`: a
+    session running without asking delivers a message of its own class unasked
+    and holds one that asserts another class, or none, for its user. The native
+    write protocol has no synchronous read receipt.
     """
+    if mode is not None and mode not in CLOUD_MODES:
+        raise ValueError(f"from-mode must be one of {CLOUD_MODES}")
     submitted = False
     try:
         os.kill(peer["pid"], 0)
@@ -206,9 +211,10 @@ def send_claude(peer, text, sender, sessions_root, *, timeout=5):
         # Keep the native provenance wrapper intact when quoting another message.
         body = re.sub(r"<(\/?cross-session-message\b)", r"<\\\1", text, flags=re.I)
         message_id = str(uuid.uuid4())
+        attrs = f'from-name="{name}"' + (f' from-mode="{mode}"' if mode else "")
         packet = {"msgV": 1, "msg_id": message_id, "type": "user", "priority": "next",
                   "message": {"role": "user", "content":
-                      f'<cross-session-message from-name="{name}">\n{body}\n</cross-session-message>'}}
+                      f'<cross-session-message {attrs}>\n{body}\n</cross-session-message>'}}
         data = b"".join((json.dumps(p, ensure_ascii=False) + "\n").encode()
                         for p in (auth, packet))
         if len(data) > 256 * 1024:
@@ -254,6 +260,23 @@ CLOUD_BETA = "ccr-byoc-2025-07-29"
 CLOUD_UA = "claude-code/2.1.270"
 CLOUD_MODES = ("bypass", "prompting")
 CLOUD_ID_RE = re.compile(r"^(?:bridge:)?(?:cse|session)_([A-Za-z0-9]+)$")
+
+
+def receiver_mode(record):
+    """The permission class a session holds an incoming message against.
+
+    The CLI classes itself `bypass` only in bypassPermissions and `prompting`
+    in every other mode -- auto, acceptEdits, default, plan -- and delivers a
+    peer message unasked only when the sender asserts that same class; a
+    message asserting the other class, or none at all to a bypass session, is
+    held for the user and never reaches the agent. A cloud record carries the
+    mode its session was started in; a bridge record fronts a session on a
+    computer, which runs in bypass here."""
+    record = record or {}
+    mode = (record.get("session_context") or {}).get("permission_mode") or record.get("permission_mode")
+    if mode:
+        return "bypass" if mode == "bypassPermissions" else "prompting"
+    return "prompting" if record.get("environment_kind") == "anthropic_cloud" else "bypass"
 _ENVELOPE_TAG = "cross-session-message"
 _ADDRESS_SAFE = re.compile(r"[^A-Za-z0-9:_/.\\-]")
 
