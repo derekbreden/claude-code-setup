@@ -1179,7 +1179,7 @@ def _cloud_cache(name):
     return os.path.join(CLOUD_CACHE_ROOT, name)
 
 
-def cloud_sessions(force=False):
+def cloud_sessions(force=False, max_age=CLOUD_LIST_TTL):
     """Every live (active or paused) cloud record on the account, cached for a
     minute. Archived ones are left on the server: the account carries a
     thousand of them and nothing here addresses one.
@@ -1192,7 +1192,7 @@ def cloud_sessions(force=False):
     if not force:
         try:
             age = time.time() - os.path.getmtime(cache)
-            if age < CLOUD_LIST_TTL:
+            if age < max_age:
                 return json.load(open(cache))
         except (OSError, ValueError):
             pass
@@ -2205,7 +2205,9 @@ def cloud_way_back(sender):
             f'<relay to="{name}">\nyour message\n</relay>\n'
             "A watcher on that Mac delivers it within seconds; the answer arrives here as a "
             "cross-session message. To read a session's transcript instead, write "
-            '<relay read="its title" tail="40"/> the same way; it arrives in parts.\n')
+            '<relay read="its title" tail="40"/> the same way; it arrives in parts. Mid-task, '
+            'without ending your turn, run the mark as a tool call instead: '
+            'tools/relay-mark to "name" "message" (or read "title" 40) in the homesodamachine checkout.\n')
 
 
 def _send_cloud(args, target):
@@ -2383,8 +2385,9 @@ examples:
 
 def cmd_cloud_inbox(args):
     """Tail live cloud sessions and deliver their `<relay to=…>` marks locally."""
-    from cloud_inbox import Inbox
-    inbox = Inbox(interval=args.interval, only=args.session or None, cwd=args.cwd)
+    from cloud_inbox import Inbox, InboxState
+    inbox = Inbox(interval=args.interval, only=args.session or None, cwd=args.cwd,
+                  state=InboxState(args.state) if args.state else None)
     if args.once:
         n = inbox.pass_once()
         sys.stderr.write(f"[inbox] one pass: {n} delivered\n")
@@ -2783,6 +2786,9 @@ def main():
                          help="watch exactly this cloud record (repeatable; default: every live "
                               "session on Anthropic's machines)")
     p_inbox.add_argument("--once", action="store_true", help="one pass, then exit")
+    p_inbox.add_argument("--state", default=None, metavar="PATH",
+                         help="cursor file (default: ~/.jsonl2md/cloud/inbox.json, the daemon's; a manual "
+                              "run against --session should use its own)")
     p_inbox.add_argument("--cwd", default=DEFAULT_CWD, help=f"project for Codex targets (default: {DEFAULT_CWD})")
     p_inbox.set_defaults(func=cmd_cloud_inbox)
 

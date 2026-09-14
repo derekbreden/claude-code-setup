@@ -75,9 +75,13 @@ session (or Codex task) over the same transport a local `send` uses. A name that
 is answered in place with the names that do. A second mark, `<relay read="Time" tail="40"/>`,
 reads instead: the watcher renders that session's clean transcript here and posts it into the
 cloud session in parts, which is what `/relay` does for a session with no disk to pull from.
-`install.sh` keeps the watcher running as a LaunchAgent (`~/.jsonl2md/cloud/inbox.log`); every
-message sent to a cloud session tells it the marks, and the homesodamachine repo carries a
-project `/relay` and the `relay-poke` skill for a cloud session that speaks first.
+Mid-task, the mark can be a tool call instead — `tools/relay-mark to "Time" "…"` in the
+homesodamachine checkout — since a tool call is in the event stream the moment it runs and text
+between tool calls is not always recorded. Marks carry their event's time; one found more than
+ten minutes late is bounced, not delivered. `install.sh` keeps the watcher running as a
+LaunchAgent (`~/.jsonl2md/cloud/inbox.log`); every message sent to a cloud session tells it the
+marks, and the homesodamachine repo carries a project `/relay`, the `relay-poke` skill, and
+`tools/relay-mark` for a cloud session that speaks first.
 
 The target must be open in its running runtime. Unavailable receivers return a delivery error; an
 uncertain submission exits 2 and must be checked before retrying. Accepted input is not a read

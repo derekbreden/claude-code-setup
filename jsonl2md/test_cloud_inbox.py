@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import cloud_inbox
 import jsonl2md as relay
-from cloud_inbox import (Inbox, InboxState, find_pokes, find_reads, poke_text, resolve_local,
-                         resolve_transcript, split_parts)
+from cloud_inbox import (Inbox, InboxState, event_time, find_pokes, find_reads, find_tool_marks,
+                         poke_text, resolve_local, resolve_transcript, split_parts)
 from live_relay import DeliveryError
 
 
@@ -92,7 +92,7 @@ class PollTests(unittest.TestCase):
                          {"id": "cse_B", "title": "Time", "environment_kind": "bridge",
                           "status": "active", "worker_status": "idle", "connection_status": "connected"}]
         patches = [
-            patch.object(relay, "cloud_sessions", side_effect=lambda force=False: self.sessions),
+            patch.object(relay, "cloud_sessions", side_effect=lambda force=False, **kw: self.sessions),
             patch.object(relay, "cloud_head_sequence", side_effect=lambda cse: self.heads.get(cse)),
             patch.object(relay, "cloud_events", side_effect=self.fetch),
             patch.object(cloud_inbox, "send_claude", side_effect=self.record_claude),
@@ -123,9 +123,9 @@ class PollTests(unittest.TestCase):
         live = {"Time": {"name": "Time"}, "Broken": {"name": "Broken"}}
         return ("claude", live[name], sorted(live)) if name in live else (None, None, sorted(live))
 
-    def event(self, seq, text, uuid):
+    def event(self, seq, text, uuid, created_at="1970-01-01T00:00:00.000000Z", blocks=()):
         return {"event_type": "assistant", "sequence_num": str(seq), "event_id": f"e{seq}",
-                "payload": assistant(text, uuid=uuid)}
+                "created_at": created_at, "payload": assistant(text, uuid=uuid, extra_blocks=blocks)}
 
     def test_first_sight_starts_at_head_then_delivers_once(self):
         self.heads["cse_A"] = "10"
@@ -172,6 +172,85 @@ class PollTests(unittest.TestCase):
         self.events["cse_B"] = [self.event(4, '<relay to="Time">ping</relay>', "b1")]
         self.assertEqual(inbox.pass_once(), 1)
         self.assertEqual(self.sent[0][0], "Time")
+
+
+class ToolMarkTests(unittest.TestCase):
+    def tool(self, command, name="Bash"):
+        return {"type": "assistant", "uuid": "t", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "name": name, "input": {"command": command}}]}}
+
+    def test_relay_mark_invocations_parse(self):
+        pokes, reads = find_tool_marks(self.tool('cd /w && tools/relay-mark to "Time" "state?" && echo done'))
+        self.assertEqual((pokes, reads), ([("Time", "state?")], []))
+        pokes, reads = find_tool_marks(self.tool("./tools/relay-mark read 'System status' 12; ls"))
+        self.assertEqual((pokes, reads), ([], [("System status", 12, 1)]))
+        pokes, reads = find_tool_marks(self.tool("relay-mark read Time"))
+        self.assertEqual(reads, [("Time", 40, 1)])
+
+    def test_mentions_are_not_marks(self):
+        self.assertEqual(find_tool_marks(self.tool('echo "relay-mark to Time hello"')), ([], []))
+        self.assertEqual(find_tool_marks(self.tool('cat tools/relay-mark')), ([], []))
+        self.assertEqual(find_tool_marks(self.tool("tools/relay-mark to 'Time' \"unterminated")), ([], []))
+        heredoc = "python3 - <<'EOF'\nx = 'tools/relay-mark to \"name\" \"message\"'\nEOF"
+        self.assertEqual(find_tool_marks(self.tool(heredoc)), ([], []))
+        self.assertEqual(find_tool_marks(self.tool('printf "%s" tools/relay-mark to "Time" "x"')), ([], []))
+        pokes, _ = find_tool_marks(self.tool('cd /w; tools/relay-mark to "Time" "after a semicolon"'))
+        self.assertEqual(pokes, [("Time", "after a semicolon")])
+        self.assertEqual(find_tool_marks(self.tool('tools/relay-mark to "Time" ""')), ([], []))
+        self.assertEqual(find_tool_marks({"type": "user", "message": {"content": "x"}}), ([], []))
+
+    def test_event_time(self):
+        self.assertEqual(event_time({"created_at": "1970-01-01T00:10:00.500000Z"}), 600.5)
+        self.assertIsNone(event_time({"created_at": "soon"}))
+        self.assertIsNone(event_time({}))
+
+
+class TimingPollTests(PollTests):
+    def test_stale_mark_is_bounced_not_delivered(self):
+        self.inbox.clock = lambda: 5000
+        self.heads["cse_A"] = "1"
+        self.inbox.pass_once()
+        self.events["cse_A"] = [self.event(2, '<relay to="Time">late</relay>', "s1", created_at="1970-01-01T00:00:10Z"),
+                                self.event(3, '<relay read="Time"/>', "s2", created_at="1970-01-01T00:00:10Z")]
+        self.assertEqual(self.inbox.pass_once(), 0)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(len(self.bounced), 2)
+        self.assertIn("found 83 min after it was written", self.bounced[0][1])
+        self.assertIn('<relay read="Time"> was not delivered', self.bounced[1][1])
+        self.assertEqual(self.inbox.pass_once(), 0)             # bounced once, not again
+
+    def test_fresh_mark_carries_the_event_time(self):
+        self.inbox.clock = lambda: 100
+        self.heads["cse_A"] = "1"
+        self.inbox.pass_once()
+        self.events["cse_A"] = [self.event(2, '<relay to="Time">now</relay>', "f1", created_at="1970-01-01T00:01:00Z")]
+        self.assertEqual(self.inbox.pass_once(), 1)
+        self.assertIn("sent 1970-01-01 00:01:00 UTC", self.sent[0][2])
+
+    def test_tool_call_mark_is_delivered(self):
+        self.heads["cse_A"] = "1"
+        self.inbox.pass_once()
+        self.events["cse_A"] = [self.event(2, "working", "tc1", blocks=[
+            {"type": "tool_use", "name": "Bash", "input": {"command": 'tools/relay-mark to "Time" "mid-turn ask"'}}])]
+        self.assertEqual(self.inbox.pass_once(), 1)
+        self.assertEqual(self.sent[0][0], "Time")
+        self.assertIn("\nmid-turn ask\n", self.sent[0][2])
+
+    def test_young_session_is_read_from_its_start(self):
+        self.inbox.clock = lambda: 1000
+        self.sessions[0]["created_at"] = "1970-01-01T00:15:00Z"    # 100 s old
+        self.events["cse_A"] = [self.event(1, '<relay to="Time">first words</relay>', "y1", created_at="1970-01-01T00:15:30Z")]
+        self.assertEqual(self.inbox.pass_once(), 1)                # no head call, no lost first mark
+        self.assertEqual(self.sent[0][0], "Time")
+        self.assertEqual(self.state.cursor("cse_A"), "1")
+
+    def test_old_session_starts_at_head(self):
+        self.inbox.clock = lambda: 100000
+        self.sessions[0]["created_at"] = "1970-01-01T00:00:00Z"
+        self.heads["cse_A"] = "7"
+        self.events["cse_A"] = [self.event(6, '<relay to="Time">old</relay>', "o1")]
+        self.assertEqual(self.inbox.pass_once(), 0)
+        self.assertEqual(self.state.cursor("cse_A"), "7")
 
 
 class ReadMarkTests(unittest.TestCase):

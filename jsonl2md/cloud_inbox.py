@@ -35,6 +35,7 @@ import shlex
 import sys
 import time
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import jsonl2md as relay
 from live_relay import DeliveryError, send_claude, send_cloud, send_codex
@@ -50,6 +51,10 @@ STATE_PATH = os.path.join(relay.CLOUD_CACHE_ROOT, "inbox.json")
 READ_TAIL = 40
 READ_COMPACT = 1
 CHUNK_BYTES = 60_000
+MARK_EXPIRY = 600          # a mark older than this at first sight is bounced, not delivered
+BACKFILL_WINDOW = 600      # a session this young is read from its first event, not its head
+ROSTER_TTL = 10            # how stale the cloud session list may be between passes
+SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
 SEEN_KEEP = 200
 GRANT_REFRESH = 600
 LIVE_WORKERS = ("running", "idle", "requires_action")
@@ -93,6 +98,62 @@ def find_reads(record):
             opts = {k: int(v) for k, v in READ_OPT_RE.findall(m.group(3) or "")}
             out.append((m.group(2).strip(), opts.get("tail", READ_TAIL), opts.get("compact", READ_COMPACT)))
     return out
+
+
+def find_tool_marks(record):
+    """Marks carried by a `relay-mark` tool call: `(pokes, reads)`.
+
+    Text between tool calls is not always recorded, but a tool call is, the
+    moment it runs -- so `tools/relay-mark to "Time" "..."` in a Bash call is
+    a mark that need not wait for the turn to end."""
+    pokes, reads = [], []
+    if record.get("type") != "assistant":
+        return pokes, reads
+    content = (record.get("message") or {}).get("content")
+    for block in content or [] if isinstance(content, list) else []:
+        if not isinstance(block, dict) or block.get("type") != "tool_use":
+            continue
+        command = (block.get("input") or {}).get("command")
+        if not isinstance(command, str) or "relay-mark" not in command or "<<" in command:
+            continue                      # a heredoc is text, whatever it quotes
+        try:
+            lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            continue
+        i = 0
+        while i < len(tokens):
+            # An invocation opens a command: first token, or first after an operator.
+            opens = i == 0 or tokens[i - 1] in SHELL_OPERATORS
+            if os.path.basename(tokens[i]) != "relay-mark" or not opens:
+                i += 1
+                continue
+            args = []
+            i += 1
+            while i < len(tokens) and tokens[i] not in SHELL_OPERATORS:
+                args.append(tokens[i])
+                i += 1
+            if len(args) >= 3 and args[0] == "to" and args[1].strip() and args[2].strip():
+                pokes.append((args[1].strip(), args[2].strip()))
+            elif len(args) >= 2 and args[0] == "read" and args[1].strip():
+                tail = int(args[2]) if len(args) >= 3 and args[2].isdigit() else READ_TAIL
+                reads.append((args[1].strip(), tail, READ_COMPACT))
+    return pokes, reads
+
+
+def event_time(event):
+    """The event's own creation time as an epoch, or None when unparseable."""
+    raw = event.get("created_at")
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        try:
+            return parsedate_to_datetime(raw).timestamp()
+        except (TypeError, ValueError):
+            return None
 
 
 def split_parts(text, limit=CHUNK_BYTES):
@@ -235,13 +296,14 @@ def resolve_local(name, cwd):
 
 class Inbox:
     def __init__(self, *, interval=4.0, only=None, cwd=relay.DEFAULT_CWD, state=None,
-                 log=None, clock=time.time):
+                 log=None, clock=time.time, roster_ttl=ROSTER_TTL):
         self.interval = interval
         self.only = list(only or [])
         self.cwd = cwd
         self.state = state or InboxState()
         self.log = log or (lambda line: sys.stderr.write(line + "\n"))
         self.clock = clock
+        self.roster_ttl = roster_ttl
         self.grant_read_at = 0
 
     # -- roster ---------------------------------------------------------------
@@ -250,18 +312,19 @@ class Inbox:
         or exactly the ids asked for. A bridge record fronts a session on some
         computer, which has SendMessage of its own and needs no way back."""
         try:
-            sessions = relay.cloud_sessions()
+            sessions = relay.cloud_sessions(max_age=self.roster_ttl)
         except Exception as exc:
             self.log(f"[inbox] session list unavailable: {exc}")
             if not self.only:
                 return None
             sessions = []
         by_id = {s["id"]: s for s in sessions}
+        def row(s, fallback_id=None):
+            return {"id": s.get("id") or fallback_id, "title": s.get("title") or s.get("id") or fallback_id,
+                    "created": event_time({"created_at": s.get("created_at")})}
         if self.only:
-            return [{"id": relay.cloud_ids(i)[0],
-                     "title": (by_id.get(relay.cloud_ids(i)[0]) or {}).get("title") or i}
-                    for i in self.only]
-        return [{"id": s["id"], "title": s.get("title") or s["id"]} for s in sessions
+            return [row(by_id.get(relay.cloud_ids(i)[0]) or {}, relay.cloud_ids(i)[0]) for i in self.only]
+        return [row(s) for s in sessions
                 if s.get("environment_kind") == "anthropic_cloud"
                 and s.get("status") != "archived"
                 and (s.get("worker_status") in LIVE_WORKERS or not s.get("worker_status"))]
@@ -271,16 +334,26 @@ class Inbox:
         cse_id, title = session["id"], session["title"]
         cursor = self.state.cursor(cse_id)
         if cursor is None:
-            head = relay.cloud_head_sequence(cse_id)
-            if head is None:
-                return 0                      # nothing said yet; look again next pass
-            self.state.set_cursor(cse_id, head)
-            self.log(f"[inbox] watching {title!r} ({cse_id}) from event {head}")
-            return 0
+            created = session.get("created")
+            if created is not None and self.clock() - created < BACKFILL_WINDOW:
+                self.state.set_cursor(cse_id, "0")     # young: its first marks are not missed
+                self.log(f"[inbox] watching {title!r} ({cse_id}) from its first event")
+            else:
+                head = relay.cloud_head_sequence(cse_id)
+                if head is None:
+                    return 0                  # nothing said yet; look again next pass
+                self.state.set_cursor(cse_id, head)
+                self.log(f"[inbox] watching {title!r} ({cse_id}) from event {head}")
+                return 0
+            cursor = self.state.cursor(cse_id)
         events = relay.cloud_events(cse_id, after=cursor)
         if not events:
             return 0
         self.state.set_cursor(cse_id, events[-1].get("sequence_num"))
+        return self.handle(cse_id, title, events)
+
+    def handle(self, cse_id, title, events):
+        """Act on assistant events once each: marks in text, marks in tool calls."""
         delivered = 0
         for e in events:
             if e.get("event_type") != "assistant":
@@ -289,12 +362,23 @@ class Inbox:
             uuid = rec.get("uuid") or e.get("event_id")
             if not uuid or self.state.seen(cse_id, uuid):
                 continue
-            pokes, reads = find_pokes(rec), find_reads(rec)
+            tool_pokes, tool_reads = find_tool_marks(rec)
+            pokes, reads = find_pokes(rec) + tool_pokes, find_reads(rec) + tool_reads
             if not pokes and not reads:
                 continue
             self.state.mark(cse_id, uuid)
+            when = event_time(e)
+            age = None if when is None else self.clock() - when
+            if age is not None and age > MARK_EXPIRY:
+                for to, _ in pokes:
+                    self.bounce(cse_id, to, f"found {int(age // 60)} min after it was written (the watcher "
+                                "was not running then) and not delivered; write it again if it still matters", [])
+                for name, _, _ in reads:
+                    self.bounce(cse_id, name, f"found {int(age // 60)} min after it was written and not "
+                                "answered; write it again if it still matters", [], kind="read")
+                continue
             for to, body in pokes:
-                delivered += self.deliver(cse_id, title, to, body)
+                delivered += self.deliver(cse_id, title, to, body, when)
             for name, tail, compact in reads:
                 delivered += self.read(cse_id, title, name, tail, compact)
         return delivered
@@ -333,9 +417,9 @@ class Inbox:
         self.log(f"[inbox] {title!r} read {found!r} (tail {tail}): {posted}/{n} part(s) posted")
         return 1 if posted == n else 0
 
-    def deliver(self, cse_id, title, to, body):
+    def deliver(self, cse_id, title, to, body, when=None):
         kind, target, names = resolve_local(to, self.cwd)
-        text = poke_text(body, title, cse_id, self.clock())
+        text = poke_text(body, title, cse_id, self.clock() if when is None else when)
         try:
             if kind == "claude":
                 send_claude(target, text, f"{title} (cloud)", relay.SESSIONS_ROOT)
@@ -352,11 +436,10 @@ class Inbox:
 
     def bounce(self, cse_id, to, reason, names, kind="to"):
         """Answer an undeliverable mark where its author will see it."""
-        listing = ", ".join(names) if names else "none"
         what = "Live sessions on that Mac right now" if kind == "to" else "Transcripts on that Mac right now"
-        note = (f"Your <relay {kind}=\"{to}\"> was not delivered: {reason}. "
-                f"{what}: {listing}. "
-                "Write the mark again with one of those names.")
+        note = f"Your <relay {kind}=\"{to}\"> was not delivered: {reason}."
+        if names:
+            note += f" {what}: {', '.join(names)}. Write the mark again with one of those names."
         try:
             send_cloud(cse_id, note, "relay", token=self.token(), org_uuid=relay._org_uuid(),
                        mode="bypass")

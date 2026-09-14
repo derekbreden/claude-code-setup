@@ -46,6 +46,12 @@ transport from the runtime it lands in:
 | Claude session in the cloud, or on another machine | one cross-session event posted to its cloud record, the request the CLI's own `SendMessage` makes | now, through Anthropic's servers |
 | a cloud session → any session here | a `<relay to="name">…</relay>` mark in the reply that ends its turn; `cloud-inbox`, a launchd agent, tails every live cloud session and delivers the mark over the peer socket | within the poll interval, a few seconds |
 | a cloud session reading a session here | a `<relay read="title" tail="40"/>` mark; the watcher renders the clean transcript on this Mac and posts it into the cloud session in parts — `/relay` for a session with no disk to pull from | a few seconds |
+| either mark, mid-turn | `tools/relay-mark to "name" "…"` run as a tool call: the call is in the event stream the moment it runs, so the mark need not wait for the turn to end | a few seconds |
+
+A mark carries its event's own time. One found more than ten minutes after it was written (the
+watcher was down) is bounced back into the cloud session instead of delivered late: the stale
+tail the mailbox relay used to produce is what this is not. A cloud session younger than the
+roster cache is read from its first event, so nothing said before the watcher noticed it is lost.
 | Codex task | the desktop app's IPC: steer the active turn, or start one | now |
 
 A handful of titles exist in *both* rosters — "Manager", "Build", "Relay". `send` refuses
