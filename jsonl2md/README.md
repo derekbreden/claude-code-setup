@@ -72,9 +72,12 @@ A cloud session cannot post back — the server accepts its credential for its o
 so its way back is a mark in its own reply, `<relay to="Time">…</relay>`, and the `cloud-inbox`
 verb: a watcher that tails every live cloud session and delivers each mark into the named local
 session (or Codex task) over the same transport a local `send` uses. A name that matches nothing
-is answered in place with the names that do. `install.sh` keeps it running as a LaunchAgent
-(`~/.jsonl2md/cloud/inbox.log`); every message sent to a cloud session tells it the mark, and a
-project skill covers a cloud session that speaks first.
+is answered in place with the names that do. A second mark, `<relay read="Time" tail="40"/>`,
+reads instead: the watcher renders that session's clean transcript here and posts it into the
+cloud session in parts, which is what `/relay` does for a session with no disk to pull from.
+`install.sh` keeps the watcher running as a LaunchAgent (`~/.jsonl2md/cloud/inbox.log`); every
+message sent to a cloud session tells it the marks, and the homesodamachine repo carries a
+project `/relay` and the `relay-poke` skill for a cloud session that speaks first.
 
 The target must be open in its running runtime. Unavailable receivers return a delivery error; an
 uncertain submission exits 2 and must be checked before retrying. Accepted input is not a read

@@ -2204,7 +2204,8 @@ def cloud_way_back(sender):
             f"or to reach any session on Derek's Mac, write this in your reply and end your turn:\n"
             f'<relay to="{name}">\nyour message\n</relay>\n'
             "A watcher on that Mac delivers it within seconds; the answer arrives here as a "
-            "cross-session message.\n")
+            "cross-session message. To read a session's transcript instead, write "
+            '<relay read="its title" tail="40"/> the same way; it arrives in parts.\n')
 
 
 def _send_cloud(args, target):

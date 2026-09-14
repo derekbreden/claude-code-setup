@@ -38,7 +38,13 @@ echo "skill    -> ~/.codex/skills/relay"
 #    itself: no $HOME, no PATH lookup) and (re)bootstrapped in the login domain.
 LABEL="com.derekbredensteiner.relay-cloud-inbox"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-PYTHON="$(command -v python3)"
+# The interpreter must import `cryptography` (the desktop token cache is
+# decrypted with it); the first python3 on PATH is not always the one that can.
+PYTHON=""
+for candidate in /opt/homebrew/bin/python3 "$(command -v python3)" /usr/local/bin/python3 /usr/bin/python3; do
+  if [ -x "$candidate" ] && "$candidate" -c "import cryptography" 2>/dev/null; then PYTHON="$candidate"; break; fi
+done
+[ -n "$PYTHON" ] || { echo "no python3 with the cryptography module found; pip install cryptography" >&2; exit 1; }
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.jsonl2md/cloud"
 sed -e "s|__PYTHON__|$PYTHON|g" -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" \
   "$REPO/launchd/$LABEL.plist.in" > "$PLIST"

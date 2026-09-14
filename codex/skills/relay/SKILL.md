@@ -78,7 +78,8 @@ Choose the first available route that reaches the resolved target:
   lists it with what it is; the script posts the message to its cloud record, the way the
   CLI's own peer messaging does. A cloud session answers with a `<relay to="<your title>">`
   mark in its reply, which the cloud-inbox watcher on this Mac delivers into your task; the
-  message you send already tells it so.
+  message you send already tells it so. It reads a local transcript with
+  `<relay read="<title>" tail="40"/>`, answered the same way.
 
 ```sh
 python3 $J send "<exact title>" "<message>" --from "<your own task name>"

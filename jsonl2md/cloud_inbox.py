@@ -12,8 +12,15 @@ app holds. So the channel back is a mark in its own reply --
 -- and this watcher, which tails every live cloud session, finds the mark, and
 delivers the body into the named session over the same peer socket a local
 `send` uses. The named session answers with `send`, which posts to the cloud
-record. Nothing runs in the sandbox, no secret leaves this Mac, and the only
-medium is the one both sides already reach.
+record. A second mark reads instead of speaks --
+
+    <relay read="Time" tail="40"/>
+
+-- and the watcher renders that session's clean transcript here, where the
+files are, and posts it into the cloud session in parts: the `/relay` pull,
+done for a session that has no disk to pull from. Nothing runs in the sandbox,
+no secret leaves this Mac, and the only medium is the one both sides already
+reach.
 
 A name that does not resolve is answered in place: a notice is posted into the
 cloud session naming the sessions that are live, so the agent there can
@@ -35,7 +42,14 @@ from live_relay import DeliveryError, send_claude, send_cloud, send_codex
 TAG_RE = re.compile(
     r"""<relay\s+to=(["'])([^"'<>\n]{1,120})\1\s*>[ \t]*\r?\n?(.*?)\r?\n?[ \t]*</relay\s*>""",
     re.S | re.I)
+READ_RE = re.compile(
+    r"""<relay\s+read=(["'])([^"'<>\n]{1,120})\1((?:\s+(?:tail|compact)=(?:["'])\d{1,4}(?:["']))*)\s*(?:/>|>\s*</relay\s*>)""",
+    re.I)
+READ_OPT_RE = re.compile(r"""(tail|compact)=["'](\d{1,4})["']""")
 STATE_PATH = os.path.join(relay.CLOUD_CACHE_ROOT, "inbox.json")
+READ_TAIL = 40
+READ_COMPACT = 1
+CHUNK_BYTES = 60_000
 SEEN_KEEP = 200
 GRANT_REFRESH = 600
 LIVE_WORKERS = ("running", "idle", "requires_action")
@@ -59,6 +73,72 @@ def find_pokes(record):
             if body:
                 out.append((m.group(2).strip(), body))
     return out
+
+
+def _visible_texts(record):
+    if record.get("type") != "assistant":
+        return []
+    content = (record.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return [content]
+    return [b.get("text") or "" for b in content or []
+            if isinstance(b, dict) and b.get("type") == "text"]
+
+
+def find_reads(record):
+    """`[(title, tail, compact)]` for every read mark in an assistant record."""
+    out = []
+    for text in _visible_texts(record):
+        for m in READ_RE.finditer(text):
+            opts = {k: int(v) for k, v in READ_OPT_RE.findall(m.group(3) or "")}
+            out.append((m.group(2).strip(), opts.get("tail", READ_TAIL), opts.get("compact", READ_COMPACT)))
+    return out
+
+
+def split_parts(text, limit=CHUNK_BYTES):
+    """Cut on line boundaries so no part exceeds `limit` bytes; a single line
+    longer than that is cut where it must be."""
+    parts, buf, size = [], [], 0
+    for line in text.splitlines(keepends=True):
+        b = len(line.encode("utf-8"))
+        while b > limit:
+            if buf:
+                parts.append("".join(buf)); buf, size = [], 0
+            cut = line.encode("utf-8")[:limit].decode("utf-8", "ignore")
+            parts.append(cut); line = line[len(cut):]; b = len(line.encode("utf-8"))
+        if size + b > limit and buf:
+            parts.append("".join(buf)); buf, size = [], 0
+        buf.append(line); size += b
+    if buf:
+        parts.append("".join(buf))
+    return parts or [""]
+
+
+def resolve_transcript(name, cwd):
+    """The local transcript a read mark names, rendered: `(title, markdown)`
+    for a Claude session (any project's title, this project first) or a Codex
+    task, else `(None, names)` with what could have been named."""
+    sessions = relay.list_sessions(cwd)
+    titles = {s.get("title"): s for s in sessions if s.get("title") and not relay.is_cloud(s.get("cliSessionId"))}
+    try:
+        tasks = {t["title"]: t for t in relay.list_codex_sessions(cwd)}
+    except Exception:
+        tasks = {}
+    def pick(table):
+        if name in table:
+            return table[name]
+        folded = [k for k in table if k.casefold() == name.casefold()]
+        return table[folded[0]] if len(folded) == 1 else None
+    session = pick(titles)
+    if session is not None:
+        return session["title"], lambda tail, compact: relay.render_tail(relay.records_of(session), tail, compact)
+    task = pick(tasks)
+    if task is not None:
+        def render(tail, compact):
+            turns = relay.codex_dialogue(task["id"], task.get("rollout_path"))
+            return relay.render_blocks(turns[-tail:] if tail else turns, compact)
+        return task["title"], render
+    return None, sorted(set(titles) | set(tasks))
 
 
 def poke_text(body, cloud_title, cse_id, sent_at=None):
@@ -209,13 +289,49 @@ class Inbox:
             uuid = rec.get("uuid") or e.get("event_id")
             if not uuid or self.state.seen(cse_id, uuid):
                 continue
-            pokes = find_pokes(rec)
-            if not pokes:
+            pokes, reads = find_pokes(rec), find_reads(rec)
+            if not pokes and not reads:
                 continue
             self.state.mark(cse_id, uuid)
             for to, body in pokes:
                 delivered += self.deliver(cse_id, title, to, body)
+            for name, tail, compact in reads:
+                delivered += self.read(cse_id, title, name, tail, compact)
         return delivered
+
+    def read(self, cse_id, title, name, tail, compact):
+        """Render a local transcript and post it into the cloud session, in
+        parts a message can carry."""
+        try:
+            found, render = resolve_transcript(name, self.cwd)
+        except Exception as exc:
+            self.bounce(cse_id, name, f"could not read the local rosters: {exc}", [], kind="read")
+            return 0
+        if found is None:
+            self.bounce(cse_id, name, f"no session or task named {name!r} on Derek's Mac", render, kind="read")
+            return 0
+        try:
+            md = render(tail, compact)
+        except Exception as exc:
+            self.bounce(cse_id, name, f"transcript of {found!r} could not be rendered: {exc}", [], kind="read")
+            return 0
+        stamp = datetime.fromtimestamp(self.clock(), timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        parts = split_parts(md.strip() + "\n")
+        n = len(parts)
+        posted = 0
+        for i, part in enumerate(parts, 1):
+            head = (f"Clean transcript of {found!r} on Derek's Mac \u2014 last {tail} exchanges"
+                    f"{', compact' if compact else ''}, rendered {stamp}"
+                    f"{f', part {i} of {n}' if n > 1 else ''}. What was typed and what was answered; "
+                    "tool calls and thinking are stripped.\n\n")
+            try:
+                send_cloud(cse_id, head + part, "relay", token=self.token(), org_uuid=relay._org_uuid(), mode="bypass")
+                posted += 1
+            except (DeliveryError, relay.TranscriptError, ValueError) as exc:
+                self.log(f"[inbox] read {found!r} for {cse_id}: part {i}/{n} failed: {exc}")
+                break
+        self.log(f"[inbox] {title!r} read {found!r} (tail {tail}): {posted}/{n} part(s) posted")
+        return 1 if posted == n else 0
 
     def deliver(self, cse_id, title, to, body):
         kind, target, names = resolve_local(to, self.cwd)
@@ -234,11 +350,12 @@ class Inbox:
         self.log(f"[inbox] {title!r} -> {to!r} ({kind}): {' '.join(body.split())[:80]}")
         return 1
 
-    def bounce(self, cse_id, to, reason, names):
+    def bounce(self, cse_id, to, reason, names, kind="to"):
         """Answer an undeliverable mark where its author will see it."""
         listing = ", ".join(names) if names else "none"
-        note = (f"Your <relay to=\"{to}\"> was not delivered: {reason}. "
-                f"Live sessions on that Mac right now: {listing}. "
+        what = "Live sessions on that Mac right now" if kind == "to" else "Transcripts on that Mac right now"
+        note = (f"Your <relay {kind}=\"{to}\"> was not delivered: {reason}. "
+                f"{what}: {listing}. "
                 "Write the mark again with one of those names.")
         try:
             send_cloud(cse_id, note, "relay", token=self.token(), org_uuid=relay._org_uuid(),

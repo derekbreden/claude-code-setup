@@ -9,7 +9,8 @@ from unittest.mock import patch
 
 import cloud_inbox
 import jsonl2md as relay
-from cloud_inbox import Inbox, InboxState, find_pokes, poke_text, resolve_local
+from cloud_inbox import (Inbox, InboxState, find_pokes, find_reads, poke_text, resolve_local,
+                         resolve_transcript, split_parts)
 from live_relay import DeliveryError
 
 
@@ -171,6 +172,70 @@ class PollTests(unittest.TestCase):
         self.events["cse_B"] = [self.event(4, '<relay to="Time">ping</relay>', "b1")]
         self.assertEqual(inbox.pass_once(), 1)
         self.assertEqual(self.sent[0][0], "Time")
+
+
+class ReadMarkTests(unittest.TestCase):
+    def test_read_marks_parse(self):
+        rec = assistant('<relay read="Time"/> and <relay read=\'System status\' tail="12" compact="0"></relay>\n'
+                        '<relay read="Nope" tail="5" />')
+        self.assertEqual(find_reads(rec), [("Time", 40, 1), ("System status", 12, 0), ("Nope", 5, 1)])
+        self.assertEqual(find_reads(assistant('<relay to="Time">x</relay>')), [])
+        self.assertEqual(find_pokes(assistant('<relay read="Time"/>')), [])
+
+    def test_split_parts_respects_lines_and_limit(self):
+        text = "".join(f"line {i:04d} " + "x" * 90 + "\n" for i in range(50))
+        parts = split_parts(text, limit=1000)
+        self.assertEqual("".join(parts), text)
+        self.assertTrue(all(len(p.encode()) <= 1000 for p in parts))
+        self.assertTrue(all(p.endswith("\n") for p in parts))
+        self.assertEqual(split_parts("", limit=10), [""])
+        self.assertEqual(split_parts("a" * 25, limit=10), ["a" * 10, "a" * 10, "a" * 5])
+
+    def test_resolve_transcript_prefers_sessions_then_tasks(self):
+        session = {"title": "Time", "cliSessionId": "abc"}
+        with patch.object(relay, "list_sessions", return_value=[session, {"title": "Cloudy", "cliSessionId": "cse_X"}]), \
+             patch.object(relay, "list_codex_sessions", return_value=[{"id": "t1", "title": "Magnets", "rollout_path": None}]), \
+             patch.object(relay, "records_of", return_value=[{"type": "user", "message": {"role": "user", "content": "hi"}},
+                                                             {"type": "assistant", "message": {"role": "assistant", "content": "yo"}}]), \
+             patch.object(relay, "codex_dialogue", return_value=[("user", "q"), ("assistant", "a")]):
+            title, render = resolve_transcript("time", "/p")
+            self.assertEqual(title, "Time")
+            self.assertIn("# User", render(40, 0))
+            title, render = resolve_transcript("Magnets", "/p")
+            self.assertEqual(title, "Magnets")
+            self.assertIn("# Assistant", render(1, 0))
+            none, names = resolve_transcript("Cloudy", "/p")     # a cloud row is not a local transcript
+            self.assertIsNone(none)
+            self.assertEqual(names, ["Magnets", "Time"])
+
+
+class ReadPollTests(PollTests):
+    def test_read_mark_posts_transcript_in_parts(self):
+        big = "".join(f"---\n\n# User\n\n---\n\nturn {i} " + "y" * 200 + "\n\n" for i in range(700))
+        self.heads["cse_A"] = "1"
+        self.inbox.pass_once()
+        self.events["cse_A"] = [self.event(2, 'reading\n<relay read="Time" tail="9"/>', "r1")]
+        with patch.object(cloud_inbox, "resolve_transcript", return_value=("Time", lambda tail, compact: big)):
+            self.assertEqual(self.inbox.pass_once(), 1)
+        self.assertEqual(self.sent, [])
+        self.assertGreaterEqual(len(self.bounced), 3)          # the recorder catches every send_cloud
+        heads = [note.split("\n")[0] for _, note in self.bounced]
+        self.assertTrue(all(h.startswith("Clean transcript of 'Time' on Derek's Mac") for h in heads))
+        self.assertIn("last 9 exchanges, compact", heads[0])
+        self.assertIn(f"part 1 of {len(self.bounced)}", heads[0])
+        body = "".join(note.split("\n\n", 1)[1] for _, note in self.bounced)
+        self.assertEqual(body.strip(), big.strip())
+        self.assertEqual(self.inbox.pass_once(), 0)             # once
+
+    def test_read_of_unknown_name_bounces_with_transcripts(self):
+        self.heads["cse_A"] = "1"
+        self.inbox.pass_once()
+        self.events["cse_A"] = [self.event(2, '<relay read="Ghost"/>', "r2")]
+        with patch.object(cloud_inbox, "resolve_transcript", return_value=(None, ["Time", "Magnets"])):
+            self.assertEqual(self.inbox.pass_once(), 0)
+        self.assertEqual(len(self.bounced), 1)
+        self.assertIn('<relay read="Ghost"> was not delivered', self.bounced[0][1])
+        self.assertIn("Transcripts on that Mac right now: Time, Magnets", self.bounced[0][1])
 
 
 if __name__ == "__main__":
