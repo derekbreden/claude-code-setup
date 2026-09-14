@@ -42,8 +42,9 @@ transport from the runtime it lands in:
 
 | target | transport | when it arrives |
 | --- | --- | --- |
-| Claude session | a file in `~/.claude/hooks/relay-inbox/<id>/`, drained by a PreToolUse hook | that session's next tool call |
-| Codex task | `codex queue --thread <id>`, the app's own follow-up queue | end of its current turn, or when it next runs |
+| Claude session on this machine | its native peer socket (`~/.claude/sessions/<pid>.json`) | now: it wakes an idle session |
+| Claude session in the cloud, or on another machine | one cross-session event posted to its cloud record, the request the CLI's own `SendMessage` makes | now, through Anthropic's servers |
+| Codex task | the desktop app's IPC: steer the active turn, or start one | now |
 
 A handful of titles exist in *both* rosters — "Manager", "Build", "Relay". `send` refuses
 those rather than picking the runtime it happened to check first; `--kind claude|codex`
@@ -76,11 +77,13 @@ so it works in bypass mode where `send_message` cannot.
 
 ## Under the hood
 
-No cross-session messaging. A session running on this machine is a file on this disk, and
-reading it costs nothing; a session running on Anthropic's machines — one started in the
-Code section of the desktop app — has its title and its transcript only on the server, so
-that one is fetched, with the OAuth grant `claude` already signed in with. Either way the
-verbs are the same:
+A session running on this machine is a file on this disk, and reading it costs nothing; a
+session running on Anthropic's machines — one started in the Code section of the desktop
+app — has its title and its transcript only on the server, so that one is fetched. The grant
+for that is the desktop app's own: it signs the Code tab in and keeps a Claude Code token
+fresh in its encrypted cache, which is read as-is (never refreshed from here, which would
+rotate it underneath the app); the Keychain grant a terminal `claude` signs in with is the
+fallback. Either way the verbs are the same:
 
 - `jsonl2md.py list-sessions` — resolve the title (lists your user-titled sessions),
 - `jsonl2md.py export-session "<title>" --out /tmp` — render the clean transcript
@@ -109,11 +112,15 @@ to open or close; running the command *is* the act of routing.
 - **`codex queue` needs the Codex app-server daemon up.** A Claude mailbox is a file and
   keeps until the target next acts; a Codex message goes through the running daemon, and
   `send` fails loud rather than silently dropping it when that is not there.
-- A **cloud session is read-only from here**. `send` refuses it: the relay mailbox is a
-  directory under this HOME that a session picks up on its next tool call, and a worker on
-  someone else's machine never looks in it. Type into that one in the desktop app.
+- A **cloud session cannot answer through the relay**. `send` reaches it (a Claude caller is
+  handed the native address, `SendMessage to: bridge:session_…`; anyone else posts the same
+  event to its cloud record), but a session on Anthropic's machines cannot message any
+  session back yet, and one on another computer has no relay to run. Its answer is in its
+  own transcript: `delta` or `watch` it. A session that has switched cross-session messages
+  off is listed as refusing them, and the post fails loud.
 - Cloud sessions are matched to a project by **git remote**, since a cloud worker has no
-  working directory — two checkouts of one repo see the same cloud sessions.
+  working directory — two checkouts of one repo see the same cloud sessions. A session
+  bridged from another computer is listed the same way, when it is connected.
 - `JSONL2MD_NO_CLOUD=1` skips the cloud entirely, for a caller that wants no network.
 
 ## The command

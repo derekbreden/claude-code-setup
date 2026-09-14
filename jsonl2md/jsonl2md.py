@@ -46,6 +46,7 @@ Chats are fetched from claude.ai using cookies decrypted from the desktop app's 
 """
 
 import argparse
+import base64
 import glob
 import hashlib
 import json
@@ -61,7 +62,8 @@ import uuid
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
-from live_relay import DeliveryError, send_claude, send_codex
+from live_relay import (DeliveryError, cloud_address, cloud_ids, send_claude, send_cloud,
+                        send_codex)
 
 DEFAULT_CWD = "/Users/derekbredensteiner/Developer/homesodamachine"
 META_ROOT = os.path.expanduser("~/Library/Application Support/Claude/claude-code-sessions")
@@ -80,15 +82,27 @@ CODEX_HOME = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
 #
 # A session started in the Code section of the desktop app can run on Anthropic's
 # machines instead of this one. It has a title you gave it and a transcript you
-# can read, and neither is on this disk: the only local trace is its id in
-# `remote-session-spaces.json`. So it is reachable exactly one way, through the
-# same API the CLI uses, with the same OAuth grant the CLI signed in with.
+# can read, and neither is on this disk. So it is reachable exactly one way,
+# through the same API the CLI uses -- for reading its transcript and for
+# delivering a message into it. A session bridged from another computer through
+# Remote Control has the same kind of record and takes a message the same way.
+#
+# The grant: the desktop app signs the Code tab in itself and hands each CLI it
+# spawns a token over the SDK channel, refreshing it in its own encrypted cache
+# (`config.json` -> `oauth:tokenCacheV2`, Electron safeStorage under the same
+# Keychain key the cookie store uses). That cache is read here and never
+# written: refreshing it from outside would rotate the refresh token underneath
+# the app. The Keychain grant a terminal `claude` signs in with is the fallback.
 CLOUD_API = "https://api.anthropic.com"
 CLOUD_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 CLOUD_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+CLOUD_SCOPE = "user:sessions:claude_code"
 CC_KEYCHAIN_SERVICE = "Claude Code-credentials"
 CC_CREDENTIALS_FILE = os.path.expanduser("~/.claude/.credentials.json")
-CLOUD_UA = "claude-cli/2.1.246 (external, cli)"
+DESKTOP_CONFIG = os.path.join(CLAUDE_APP_DIR, "config.json")
+DESKTOP_TOKEN_KEYS = ("oauth:tokenCacheV2", "oauth:tokenCache")
+CLAUDE_JSON = os.path.expanduser("~/.claude.json")
+CLOUD_UA = "claude-code/2.1.270"
 CLOUD_CACHE_ROOT = os.path.expanduser("~/.jsonl2md/cloud")
 CLOUD_LIST_TTL = 60
 # Cloud ids carry their own prefix, so the id alone says which side a session
@@ -569,6 +583,14 @@ def resolve_any_target(positional, cwd, kind=None):
             claude_hit = {"kind": "claude", "id": positional, "label": positional}
         elif is_cloud(positional):
             claude_hit = {"kind": "claude", "id": positional, "label": positional}
+        else:
+            try:
+                cse_id = cloud_ids(positional)[0]      # session_… or bridge:session_…
+            except ValueError:
+                cse_id = None
+            if cse_id:
+                claude_hit = {"kind": "claude", "id": cse_id,
+                              "label": _label_for_id(cse_id, cwd) or cse_id}
 
     if claude_hit and codex_hit:
         sys.stderr.write(
@@ -943,12 +965,109 @@ def _cc_credentials_write(kind, handle, cred):
                    check=True, capture_output=True)
 
 
-def _cloud_token():
-    """A live access token, refreshing the stored grant when it has aged out.
+def _safe_storage_decrypt(b64):
+    """Electron safeStorage on macOS: `v10` + AES-128-CBC under the app's
+    Keychain password, PKCS7 padded, no digest prefix (unlike a cookie)."""
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+    from cryptography.hazmat.backends import default_backend
+    raw = base64.b64decode(b64)
+    if raw[:3] not in (b"v10", b"v11"):
+        raise ValueError("not a safeStorage blob")
+    d = Cipher(algorithms.AES(_claude_app_aes_key()), modes.CBC(b" " * 16),
+               backend=default_backend()).decryptor()
+    pt = d.update(raw[3:]) + d.finalize()
+    return pt[:-pt[-1]].decode("utf-8")
 
-    Tokens last eight hours and a tree of sessions runs for days, so expiry is
+
+def grant_key_fields(key):
+    """`acct:<account>|<client>:<org>:<api host>:<scopes>` -> (client, org, scopes).
+    The host carries colons and the scopes carry spaces, so it is split by shape."""
+    _, _, tail = key.partition("|")
+    try:
+        client, org, rest = tail.split(":", 2)
+    except ValueError:
+        return None, None, ()
+    m = re.match(r"^(https?://[^/:\s]+(?::\d+)?):(.*)$", rest)
+    scopes = tuple((m.group(2) if m else rest).split())
+    return client, org, scopes
+
+
+def pick_desktop_grant(cache, now_ms, client_id=CLOUD_CLIENT_ID, scope=CLOUD_SCOPE):
+    """The desktop app's Claude Code grant: the entry minted for the CLI's
+    client id carrying the sessions scope, unexpired, freshest first. None
+    when the app holds nothing usable, which is the signal to fall back."""
+    best = None
+    for key, entry in (cache or {}).items():
+        if not isinstance(entry, dict) or not entry.get("token"):
+            continue
+        client, org, scopes = grant_key_fields(key)
+        if client != client_id or scope not in scopes:
+            continue
+        expires = entry.get("expiresAt") or 0
+        if expires <= now_ms + 60_000:
+            continue
+        if best is None or expires > best["expiresAt"]:
+            best = {"token": entry["token"], "expiresAt": expires, "org": org}
+    return best
+
+
+_DESKTOP_GRANT = {}
+
+
+def _desktop_grant():
+    """The desktop app's live grant, read once per process; `(grant, reason)`."""
+    if "value" in _DESKTOP_GRANT:
+        return _DESKTOP_GRANT["value"]
+    grant, reason = None, ""
+    try:
+        cfg = json.load(open(DESKTOP_CONFIG))
+        cache = {}
+        for key in DESKTOP_TOKEN_KEYS:
+            if cfg.get(key):
+                cache.update(json.loads(_safe_storage_decrypt(cfg[key])))
+        if not cache:
+            reason = "the desktop app has no token cache (not signed in to the Code tab?)"
+        else:
+            grant = pick_desktop_grant(cache, time.time() * 1000)
+            if grant is None:
+                reason = "the desktop app's Claude Code grant is expired (open the Claude app signed in)"
+    except FileNotFoundError:
+        reason = "no desktop app config at %s" % DESKTOP_CONFIG
+    except Exception as exc:  # keychain refusal, undecryptable blob, malformed cache
+        reason = f"desktop token cache unreadable: {exc}"
+    _DESKTOP_GRANT["value"] = (grant, reason)
+    return grant, reason
+
+
+def _org_uuid():
+    """The organisation the grant acts under, as the CLI resolves it."""
+    env = os.environ.get("CLAUDE_CODE_ORGANIZATION_UUID")
+    if env:
+        return env
+    try:
+        org = (json.load(open(CLAUDE_JSON)).get("oauthAccount") or {}).get("organizationUuid")
+        if org:
+            return org
+    except Exception:
+        pass
+    grant, _ = _desktop_grant()
+    return (grant or {}).get("org")
+
+
+def _cloud_token():
+    """A live access token: the desktop app's, then the Keychain grant.
+
+    The desktop app keeps its own grant fresh for the sessions it runs, so it
+    is read as-is. The Keychain grant is refreshed here when it has aged out;
+    tokens last eight hours and a tree of sessions runs for days, so expiry is
     the normal case, not the error case."""
-    kind, handle = _cc_credential_store()
+    grant, why = _desktop_grant()
+    if grant:
+        return grant["token"]
+    try:
+        kind, handle = _cc_credential_store()
+    except TranscriptError as exc:
+        raise TranscriptError(f"{why}; and {exc}")
     cred = _cc_credentials_read(kind, handle)
     oauth = cred.get("claudeAiOauth") or {}
     if not oauth.get("accessToken"):
@@ -1061,11 +1180,14 @@ def _cloud_cache(name):
 
 
 def cloud_sessions(force=False):
-    """Every cloud session on the account, freshest first, cached for a minute.
+    """Every live (active or paused) cloud record on the account, cached for a
+    minute. Archived ones are left on the server: the account carries a
+    thousand of them and nothing here addresses one.
 
     The cache is what lets `list-sessions` and `situation` stay as fast as they
     were when every session was a file: one request per minute, and a stale copy
-    is served rather than nothing when the network is gone."""
+    is served rather than nothing when the network or the grant is gone -- said
+    so on stderr, because a silent stale roster reads as a current one."""
     cache = _cloud_cache("sessions.json")
     if not force:
         try:
@@ -1075,12 +1197,23 @@ def cloud_sessions(force=False):
         except (OSError, ValueError):
             pass
     try:
-        data = _cloud_get("/v1/code/sessions?limit=200").get("data", [])
-    except TranscriptError:
+        data, cursor = [], None
+        for _ in range(20):
+            q = "/v1/code/sessions?limit=200&statuses=active&statuses=paused"
+            page = _cloud_get(q + (f"&cursor={cursor}" if cursor else ""))
+            data.extend(page.get("data", []))
+            cursor = page.get("next_cursor")
+            if not cursor:
+                break
+    except TranscriptError as exc:
         try:
-            return json.load(open(cache))
+            stale = json.load(open(cache))
+            age = time.time() - os.path.getmtime(cache)
+            sys.stderr.write(f"[cloud] session list failed ({exc}); serving the copy from "
+                             f"{ago(age)} ago\n")
+            return stale
         except (OSError, ValueError):
-            raise
+            raise exc
     tmp = cache + ".tmp"
     with open(tmp, "w") as f:
         json.dump(data, f)
@@ -1088,14 +1221,31 @@ def cloud_sessions(force=False):
     return data
 
 
-def list_cloud_sessions(target_cwd):
-    """Cloud sessions for this project, shaped like a desktop session so every
-    verb downstream treats them identically.
+def _local_bridge_ids():
+    """The cloud records that front sessions on THIS machine, by bare id. Every
+    desktop session is mirrored to one (its `bridgeSessionIds`), and so is a
+    CLI that registered a peer socket (`bridgeSessionId`)."""
+    ids = set()
+    for p in glob.glob(f"{META_ROOT}/*/*/local_*.json") + glob.glob(f"{SESSIONS_ROOT}/*.json"):
+        try:
+            m = json.load(open(p))
+        except Exception:
+            continue
+        for b in (m.get("bridgeSessionIds") or []) + [m.get("bridgeSessionId")]:
+            if b:
+                ids.add(re.sub(r"^(?:session|cse)_", "", b))
+    return ids
 
-    Only `anthropic_cloud` ones. A cloud record also exists for each session
-    running HERE -- environment_kind `bridge` -- and that one is already listed
-    from its own metadata and its own transcript; listing it again from the API
-    would double every session in the tree under a second id."""
+
+def list_cloud_sessions(target_cwd):
+    """Cloud records for this project that are NOT sessions on this machine,
+    shaped like a desktop session so every verb downstream treats them alike.
+
+    Two kinds. `anthropic_cloud`: a session running on Anthropic's machines.
+    `bridge`: a session bridged through Remote Control -- one of those exists
+    for every session running HERE too, and that one is already listed from
+    its own metadata and its own transcript, so only a bridge record no local
+    session claims (a live session on another computer) is listed."""
     if os.environ.get("JSONL2MD_NO_CLOUD"):
         return []
     repo = project_repo(target_cwd)
@@ -1105,12 +1255,20 @@ def list_cloud_sessions(target_cwd):
         sessions = cloud_sessions()
     except (TranscriptError, OSError, ValueError):
         return []
+    local = None
     out = []
     for s in sessions:
-        if s.get("environment_kind") != "anthropic_cloud" or s.get("status") == "archived":
+        kind = s.get("environment_kind")
+        if s.get("status") == "archived" or kind not in ("anthropic_cloud", "bridge"):
             continue
         if repo not in _cloud_session_repos(s):
             continue
+        if kind == "bridge":
+            if s.get("connection_status") != "connected":
+                continue
+            local = _local_bridge_ids() if local is None else local
+            if s["id"][4:] in local:
+                continue
         out.append({
             "cliSessionId": s["id"],
             "cwd": target_cwd,
@@ -1120,8 +1278,23 @@ def list_cloud_sessions(target_cwd):
             "lastActivityAt": int((epoch_of(s.get("last_event_at")
                                              or s.get("created_at")) or 0) * 1000),
             "cloudLastEventAt": s.get("last_event_at"),
+            "cloudKind": "cloud" if kind == "anthropic_cloud" else "remote",
+            "cloudWorker": s.get("worker_status"),
+            "cloudInbound": (s.get("external_metadata") or {}).get("cross_session_inbound"),
         })
     return out
+
+
+def cloud_reach(session):
+    """How a caller reaches a cloud row: the native address for a Claude
+    caller, the script verb for anyone else, and what kind of thing it is."""
+    kind = session.get("cloudKind") or "cloud"
+    where = "in the cloud, cannot reply" if kind == "cloud" else "on another machine"
+    if session.get("cloudInbound") == "unavailable":
+        where += ", refuses peer messages"
+    if caller_has_peer_channel():
+        return f"SendMessage to: {cloud_address(session['cliSessionId'])}  ({where})"
+    return f'send "{session.get("title")}"  ({where})'
 
 
 def cloud_events(cse_id, after=None):
@@ -1321,7 +1494,7 @@ def cmd_list_sessions(args):
         if peer:
             print(f'{s["title"]:<{width}}  → SendMessage to: {peer["name"]}')
         elif is_cloud(s.get("cliSessionId")):
-            print(f'{s["title"]:<{width}}  → cloud session (read-only here)')
+            print(f'{s["title"]:<{width}}  → {cloud_reach(s)}')
         else:
             print(f'{s["title"]:<{width}}  → no live receiver (--defer for legacy mailbox)')
 
@@ -1579,7 +1752,7 @@ def situation(cwd, exclude=None):
             "title": s.get("title"),
             "cliSessionId": cli,
             "cloud": is_cloud(cli),
-            "address": (peers.get(cli) or {}).get("name"),
+            "address": (peers.get(cli) or {}).get("name") or (cloud_address(cli) if is_cloud(cli) else None),
             "state": st.get("state", "-"),
             "idle_for": st.get("idle_for") if st.get("state") not in (None, "working") else None,
             "asked_ago": (now - epoch_of(last["when"])) if last and epoch_of(last["when"]) else None,
@@ -1601,7 +1774,7 @@ def cmd_situation(args):
         sys.stderr.write(f"no titled sessions in {args.cwd}\n")
         return 1
     def address_of(row):
-        return row["address"] or ("(cloud)" if row["cloud"] else "(relay only)")
+        return row["address"] or "(relay only)"
 
     tw = max(len(r["title"] or "") for r in rows)
     aw = max(len(address_of(r)) for r in rows)
@@ -1631,7 +1804,7 @@ def cmd_board(args):
         if not cli or cli in (args.exclude or []):
             continue
         if is_cloud(cli):
-            reach = "(cloud - read only)"
+            reach = cloud_reach(s)
         elif peers.get(cli):
             reach = (f'SendMessage to: {peers[cli]["name"]}' if caller_has_peer_channel()
                      else f'send "{s.get("title")}" (live)')
@@ -2007,6 +2180,61 @@ def _send_codex(args, target):
     return 0
 
 
+def _caller_bridge_address():
+    """The reply address of a Claude caller: its own session's cloud record,
+    when the desktop app has mirrored it. Nothing for a Codex caller."""
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not (caller_has_peer_channel() and sid):
+        return None
+    for p in glob.glob(f"{META_ROOT}/*/*/local_*.json"):
+        try:
+            m = json.load(open(p))
+        except Exception:
+            continue
+        if m.get("cliSessionId") == sid and m.get("bridgeSessionIds"):
+            return cloud_address(m["bridgeSessionIds"][-1])
+    return None
+
+
+def _send_cloud(args, target):
+    """A session in the cloud or on another machine: one event posted to its
+    cloud record, or the native tool when the caller has one."""
+    cse_id, label = target["id"], target["label"]
+    if getattr(args, "defer", False):
+        sys.stderr.write("[relay] --defer is a mailbox on this disk; a cloud session never reads "
+                         "it. Nothing was sent.\n")
+        return 1
+    if caller_has_peer_channel() and not args.force_relay:
+        sys.stderr.write(
+            f"[relay] {label!r} is reachable through your native peer channel:\n"
+            f"[relay]   SendMessage(to: {json.dumps(cloud_address(cse_id))}, message: \"...\")\n"
+            f"[relay] Nothing was sent. If that tool is unavailable, re-run with --force-relay.\n"
+        )
+        return 1
+    try:
+        token = _cloud_token()
+    except TranscriptError as exc:
+        return _delivery_failed(target, DeliveryError(f"no cloud grant: {exc}"))
+    reply_label = _label_for_id(args.reply_to, args.cwd) if args.reply_to else None
+    text = codex_envelope(args.text, args.sender, None, None)
+    if args.reply_to:
+        text += (f"\nReply to {reply_label or args.reply_to}: you are not on the sender's machine, "
+                 "so answer in your own transcript; the sender reads it from there.\n")
+    try:
+        receipt = send_cloud(cse_id, text, args.sender, token=token, org_uuid=_org_uuid(),
+                             mode=args.from_mode, from_address=_caller_bridge_address())
+    except (DeliveryError, ValueError) as exc:
+        if not isinstance(exc, DeliveryError):
+            exc = DeliveryError(str(exc))
+        return _delivery_failed(target, exc)
+    seq = f" (event {receipt['sequenceNum']})" if receipt.get("sequenceNum") else ""
+    sys.stderr.write(f"[relay] {label!r}: posted to its cloud record{seq}; agent reading is not "
+                     f"confirmed. Its answer lands in its own transcript: "
+                     f"jsonl2md.py delta {shlex.quote(label)}\n")
+    print(json.dumps(receipt))
+    return 0
+
+
 def _defer_claude(args, target):
     """Explicit compatibility path with a finite lifetime; never a send fallback."""
     ttl = getattr(args, "expires_in", DEFERRED_TTL)
@@ -2040,9 +2268,7 @@ def cmd_send(args):
         return _send_codex(args, target)
     cli_id, label = target["id"], target["label"]
     if is_cloud(cli_id):
-        sys.stderr.write(f"[relay] {label} is a cloud session; local delivery cannot reach it. "
-                         "Nothing was sent.\n")
-        return 1
+        return _send_cloud(args, target)
     if getattr(args, "defer", False):
         return _defer_claude(args, target)
     peer = peer_addresses().get(cli_id)
@@ -2127,6 +2353,11 @@ examples:
 
   # Explicit legacy Claude delivery: no wake-up, expires after five minutes.
   jsonl2md.py send "Build time" "..." --defer --expires-in 300
+
+  # A session in the cloud, or on another machine: the same verb. A Claude caller
+  # is handed the native address; anyone else posts to its cloud record.
+  jsonl2md.py send "Ceiling panel" "The 3 mm floor is the limit; see grip-roof-shared-datum" --from "Tower"
+  jsonl2md.py delta "Ceiling panel" --tail 2      # its answer is in its own transcript
   jsonl2md.py await-reply "My Session Title" --timeout 300  # legacy only, in background
 
   # Standalone: any Claude Code .jsonl on disk
@@ -2287,6 +2518,18 @@ def cmd_selftest(args):
     check("send time is visible", "sent 1970-01-01 00:00:00 UTC" in envelope, True)
     check("reply does not request another reply", "--reply-to" in envelope, False)
     check("short source label", envelope.startswith("Agent message from Sender"), True)
+
+    # Cloud targets: every spelling of a record's id is the same target, and the
+    # grant is the desktop app's before the Keychain's.
+    check("cloud id spellings agree",
+          {cloud_ids(x)[0] for x in ("cse_Q1", "session_Q1", "bridge:session_Q1")}, {"cse_Q1"})
+    check("cloud address is the native one", cloud_address("cse_Q1"), "bridge:session_Q1")
+    check("grant key parses by shape",
+          grant_key_fields("acct:A|C:ORG:https://api.anthropic.com:user:inference user:sessions:claude_code"),
+          ("C", "ORG", ("user:inference", "user:sessions:claude_code")))
+    check("expired desktop grant is not a grant",
+          pick_desktop_grant({f"acct:A|{CLOUD_CLIENT_ID}:O:https://api.anthropic.com:{CLOUD_SCOPE}":
+                              {"token": "t", "expiresAt": 5000}}, 5000), None)
 
     for f in failed:
         sys.stderr.write("FAIL " + f + "\n")
@@ -2491,6 +2734,9 @@ def main():
                              "(default: resolve across both and fail loud on a collision)")
     p_send.add_argument("--force-relay", action="store_true",
                         help="use the live script transport instead of redirecting to a native tool")
+    p_send.add_argument("--from-mode", dest="from_mode", choices=["bypass", "prompting"], default="bypass",
+                        help="cloud targets: the permission class asserted for the sender; a receiver "
+                             "delivers unasked only from its own class (default: bypass)")
     p_send.add_argument("--defer", action="store_true",
                         help="explicitly use a legacy Claude mailbox instead of live delivery")
     p_send.add_argument("--expires-in", type=float, default=DEFERRED_TTL, metavar="SECONDS",

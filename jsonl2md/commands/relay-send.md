@@ -11,7 +11,10 @@ Send a message into another of the user's agents. Request: **$ARGUMENTS**
    If the intended target is unclear, ask rather than guessing.
 2. Use a native tool when available: Claude peers use `SendMessage`; Codex tasks use
    `mcp__codex_app__send_message_to_thread`. The script redirects same-runtime callers to
-   these tools without sending anything.
+   these tools without sending anything. A Claude session in the cloud, or on another
+   machine, is a Claude peer too: the board prints its address (`bridge:session_…`) and
+   `SendMessage` takes it verbatim. Such a session cannot reply here; read its answer with
+   `/relay` or `jsonl2md.py delta "<title>"`.
 3. For cross-runtime delivery, run:
 
    ```sh

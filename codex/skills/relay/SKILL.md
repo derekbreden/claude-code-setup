@@ -74,6 +74,10 @@ Choose the first available route that reaches the resolved target:
 - **Cross-runtime or no native tool available:** use the script below. It steers an active
   Codex task or starts an idle task, and submits directly to a Claude peer receiver, which
   wakes an idle session. The target must be open in its running desktop runtime.
+- **A Claude session in the cloud, or on another machine:** the same script verb. The board
+  lists it with what it is; the script posts the message to its cloud record, the way the
+  CLI's own peer messaging does. It cannot answer you through the relay: read its reply in
+  its own transcript with `delta`.
 
 ```sh
 python3 $J send "<exact title>" "<message>" --from "<your own task name>"
@@ -87,7 +91,8 @@ the live script transport. A failed live send does not create a delayed queue. E
 send just because the receiver has not answered yet.
 
 A title that exists in **both** runtimes is refused rather than guessed; pass `--kind claude` or
-`--kind codex` to say which.
+`--kind codex` to say which. A cloud record's id works as a title in every spelling
+(`cse_…`, `session_…`, `bridge:session_…`).
 
 No route shares your conversation history. Lead with the fact that changes what the receiver
 does, and identify agent-authored messages as coming from the agent.

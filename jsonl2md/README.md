@@ -59,8 +59,15 @@ Markdown.
 
 Same-runtime agents use their native messaging tools when available. Cross-runtime sends use
 `live_relay.py`: Codex's existing desktop IPC router steers an active task or starts an idle
-one, while Claude's authenticated peer socket enqueues input and wakes its receiver. Messages
-carry a sender label and UTC send time. Add a return address when an answer is needed.
+one, while Claude's authenticated peer socket enqueues input and wakes its receiver. A Claude
+session that is not on this machine — running in the cloud, or bridged from another computer
+through Remote Control — takes one cross-session event posted to its cloud record, the request
+the CLI's own `SendMessage` makes; a Claude caller is handed that tool's address
+(`bridge:session_…`) instead. Messages carry a sender label and UTC send time. Add a return
+address when an answer is needed; a cloud session cannot answer through the relay, so its
+reply is read from its own transcript with `delta`. `--from-mode` asserts the sender's
+permission class (default `bypass`): a receiver delivers a peer message unasked only when the
+classes match, and holds it for its user otherwise.
 
 The target must be open in its running runtime. Unavailable receivers return a delivery error; an
 uncertain submission exits 2 and must be checked before retrying. Accepted input is not a read
@@ -276,22 +283,30 @@ local trace is its id in `remote-session-spaces.json`. So it is read the way the
 - `GET https://api.anthropic.com/v1/code/sessions` for the list, `…/events` for the transcript.
   Event payloads are Claude Code transcript records already, so they render through the same
   path as a `.jsonl`; only the flags marking a record as machine-written differ in spelling.
-- Auth is the OAuth grant `claude` signed in with, read from the Keychain item
-  `Claude Code-credentials` (or `~/.claude/.credentials.json`) and refreshed when it has aged
-  out. The refresh token rotates on use, so the new grant is written back where the CLI looks.
+- Auth is the desktop app's own Claude Code grant first: the app signs the Code tab in and
+  keeps a token fresh for the CLIs it spawns, in `config.json` → `oauth:tokenCacheV2`,
+  encrypted with the same `Claude Safe Storage` Keychain key the cookie store uses. It is read
+  as-is and never refreshed from here — that would rotate the refresh token underneath the
+  app. The fallback is the grant a terminal `claude` signed in with, from the Keychain item
+  `Claude Code-credentials` (or `~/.claude/.credentials.json`), refreshed when it has aged out
+  and written back where the CLI looks.
 - A cloud worker has no working directory, so a cloud session is matched to a project by **git
   remote** — two checkouts of one repo see the same cloud sessions.
-- Only `environment_kind == "anthropic_cloud"` is listed. A cloud record also exists for each
-  session running *here* (`bridge`), and that one is already listed from its own metadata and
-  its own transcript.
+- `environment_kind == "anthropic_cloud"` is listed, and so is a connected `bridge` record no
+  session on this machine claims — a live session on another computer. A cloud record also
+  exists for each session running *here* (`bridge`), and that one is already listed from its
+  own metadata and its own transcript. Only active and paused records are fetched; the
+  archived thousand stay on the server.
 - The list is cached for a minute under `~/.jsonl2md/cloud/`, which is what keeps a listing
   as fast as it was when every session was a file — on the warm path the added work is one
   JSON read and an `origin` URL parsed out of `.git/config`. A transcript is cached
   against the session's `last_event_at` — a session that has not gained an event cannot have
-  changed. When the network is gone the stale copy is served, so the sessions that *are* on
-  this disk still list. `JSONL2MD_NO_CLOUD=1` skips the cloud entirely.
-- Reading is the whole of it: `send` refuses a cloud target, because the relay mailbox is a
-  directory under this HOME that a worker on another machine never looks in.
+  changed. When the network or the grant is gone the stale copy is served and stderr says
+  so, so the sessions that *are* on this disk still list. `JSONL2MD_NO_CLOUD=1` skips the
+  cloud entirely.
+- `send` reaches a cloud target: one `type: user` event carrying a `<cross-session-message>`
+  envelope, posted to `/v1/code/sessions/<id>/events` under the same grant — the receiving
+  CLI recognises the envelope byte for byte, so its grammar is the CLI's, not this tool's.
 
 **Claude.ai chats:**
 
@@ -324,7 +339,7 @@ This list exists because each item is a thing somebody might reasonably want dif
 - **Tool calls, tool results, thinking blocks, system messages, attachments, and files are unconditionally stripped.** There is no flag to include them. The whole reason the tool exists is to produce a transcript of just the spoken text. That includes the things the harness posts under *your* name — task notifications, peer-session messages, command bodies, local command output — which are system messages wearing a user record.
 - **Output filenames are the session/chat title verbatim**, with `/`, `\`, and `:` replaced by `_`. Filename collisions silently overwrite.
 - **macOS only.** The cookie decryption format, keychain service names, and filesystem paths are all macOS-specific. A Linux/Windows port would need new code in three places.
-- **Cloud reads cost a network round trip**, and the OAuth refresh writes back to your Keychain. Both are what the CLI itself does; `JSONL2MD_NO_CLOUD=1` opts out of the whole path.
+- **Cloud reads cost a network round trip**, and the Keychain fallback's OAuth refresh writes back to your Keychain. Both are what the CLI itself does; `JSONL2MD_NO_CLOUD=1` opts out of the whole path.
 - **No license file.** Treat it as a reference implementation; copy what's useful.
 
 ## Samples

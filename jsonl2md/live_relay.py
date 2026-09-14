@@ -1,12 +1,16 @@
-"""Live local delivery through the installed desktop runtimes.
+"""Live delivery through the installed desktop runtimes and the cloud sessions API.
 
 Codex desktop IPC uses length-prefixed JSON requests. Claude's registered peer
-socket accepts authenticated newline-delimited JSON. Neither path writes a
-deferred message to disk. A timeout after submission is uncertain, never a
-reason to resend through another transport.
+socket accepts authenticated newline-delimited JSON. A Claude session that is
+not on this machine -- one running on Anthropic's machines, or bridged from
+another computer through Remote Control -- takes a cross-session event posted
+to its cloud record, the same request the CLI's own SendMessage makes. No path
+writes a deferred message to disk. A timeout after submission is uncertain,
+never a reason to resend through another transport.
 """
 
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -15,7 +19,9 @@ import stat
 import struct
 import sys
 import time
+import unicodedata
 import uuid
+from urllib.parse import quote, urlsplit
 
 
 class DeliveryError(Exception):
@@ -230,3 +236,145 @@ def send_claude(peer, text, sender, sessions_root, *, timeout=5):
         raise
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise DeliveryError(f"Claude peer delivery failed: {exc}", uncertain=submitted) from exc
+
+
+# --- cloud sessions -----------------------------------------------------------
+#
+# A cloud record (`cse_…` in the API, `session_…` inside the CLI) fronts every
+# session the account can reach through Anthropic's servers: a session running
+# on their machines, and any session bridged from a computer through Remote
+# Control. The CLI's SendMessage reaches both the same way -- one `type: user`
+# event whose text is a `<cross-session-message>` envelope, posted to the
+# record's events endpoint -- and the receiving CLI recognises the envelope
+# byte for byte, so the attribute order and the escaping below are the
+# receiver's grammar, not a style choice.
+
+CLOUD_API = "https://api.anthropic.com"
+CLOUD_BETA = "ccr-byoc-2025-07-29"
+CLOUD_UA = "claude-code/2.1.270"
+CLOUD_MODES = ("bypass", "prompting")
+CLOUD_ID_RE = re.compile(r"^(?:bridge:)?(?:cse|session)_([A-Za-z0-9]+)$")
+_ENVELOPE_TAG = "cross-session-message"
+_ADDRESS_SAFE = re.compile(r"[^A-Za-z0-9:_/.\\-]")
+
+
+def cloud_ids(any_id):
+    """`(cse_id, session_id)` for a cloud session id in any spelling the tree
+    meets -- the API's `cse_`, the CLI's `session_`, or a `bridge:` address."""
+    m = CLOUD_ID_RE.match((any_id or "").strip())
+    if not m:
+        raise ValueError(f"not a cloud session id: {any_id!r}")
+    return "cse_" + m.group(1), "session_" + m.group(1)
+
+
+def cloud_address(any_id):
+    """The address a Claude caller hands its native SendMessage tool."""
+    return "bridge:" + cloud_ids(any_id)[1]
+
+
+def cloud_name(sender):
+    """The `from-name` the receiving CLI will accept: no quotes or angle
+    brackets, no control or format characters, at most 64 code points."""
+    text = re.sub(r'["<>]', "", sender or "")
+    text = "".join(c for c in text if unicodedata.category(c) not in ("Cc", "Cf", "Cs", "Zl", "Zp")).strip()
+    chars = list(text)
+    return "".join(chars[:64]) + "\u2026" if len(chars) > 64 else text
+
+
+def cloud_envelope(text, sender, mode="bypass", from_address=None):
+    """The envelope the CLI's own SendMessage writes for a cloud peer.
+
+    `from` is a reply address (a `bridge:` address of the sending session);
+    `from-name` a display label; `from-mode` the sender's permission class,
+    which the receiver compares with its own before delivering unasked."""
+    if mode not in CLOUD_MODES:
+        raise ValueError(f"from-mode must be one of {CLOUD_MODES}")
+    attrs = []
+    if from_address:
+        attrs.append(f'from="{_ADDRESS_SAFE.sub(lambda m: quote(m.group(0), safe=""), from_address)}"')
+    name = cloud_name(sender)
+    if name:
+        attrs.append(f'from-name="{name}"')
+    attrs.append(f'from-mode="{mode}"')
+    body = re.sub(rf"<(\/?{_ENVELOPE_TAG}\b)", r"<\\\1", text, flags=re.I)
+    return f"<{_ENVELOPE_TAG} {' '.join(attrs)}>\n{body}\n</{_ENVELOPE_TAG}>"
+
+
+def _cloud_refusal(status, data):
+    detail = ""
+    code = ""
+    try:
+        parsed = json.loads(data or b"{}")
+        err = parsed.get("error") if isinstance(parsed, dict) else None
+        if isinstance(err, dict):
+            detail = str(err.get("message") or "")[:200]
+            code = str(err.get("resource") or err.get("type") or "")
+        elif isinstance(err, str):
+            detail = err[:200]
+    except ValueError:
+        detail = (data or b"")[:200].decode("utf-8", "replace")
+    if status == 401:
+        return ("auth: the cloud API rejected the token (401). The desktop app's Claude Code "
+                "grant is stale; open the Claude app signed in, or run `claude auth login`.")
+    if status == 403:
+        why = {"untrusted_device": "this device is not enrolled as trusted for that session",
+               "session_stale_relogin": "the sign-in behind the token is stale; sign in again"}.get(code)
+        return f"auth: refused (403){': ' + why if why else ''}{' \u2014 ' + detail if detail and not why else ''}"
+    if status == 404:
+        return "no such cloud session (archived, or the id is stale) \u2014 re-run `board`"
+    return f"HTTP {status}{': ' + detail if detail else ''}"
+
+
+def send_cloud(any_id, text, sender, *, token, org_uuid, mode="bypass", from_address=None,
+               base_url=CLOUD_API, timeout=10):
+    """Post one cross-session message to a cloud record.
+
+    Returns the receipt on 2xx. Anything the server said no to raises a
+    certain DeliveryError; a connection that died after the request was on the
+    wire raises an uncertain one, because the event may have been accepted."""
+    cse_id, session_id = cloud_ids(any_id)
+    if not token:
+        raise DeliveryError("no cloud grant available; nothing was sent")
+    message_id = str(uuid.uuid4())
+    payload = {"msgV": 1, "msg_id": message_id, "type": "user",
+               "message": {"role": "user", "content": cloud_envelope(text, sender, mode, from_address)},
+               "parent_tool_use_id": None, "session_id": session_id, "uuid": str(uuid.uuid4())}
+    body = json.dumps({"events": [{"payload": payload}]}, ensure_ascii=False).encode("utf-8")
+    if len(body) > 256 * 1024:
+        raise DeliveryError("message exceeds the relay's 256 KiB limit")
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+               "anthropic-version": "2023-06-01", "anthropic-client-platform": "claude_code",
+               "anthropic-beta": CLOUD_BETA, "User-Agent": CLOUD_UA,
+               "Content-Length": str(len(body))}
+    if org_uuid:
+        headers["x-organization-uuid"] = org_uuid
+    url = urlsplit(base_url)
+    conn_cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(url.hostname, url.port, timeout=timeout)
+    path = f"{url.path.rstrip('/')}/v1/code/sessions/{quote(cse_id, safe='')}/events"
+    submitted = False
+    try:
+        try:
+            conn.request("POST", path, body, headers)
+        except (OSError, http.client.HTTPException) as exc:
+            raise DeliveryError(f"cloud post failed before sending: {exc}") from exc
+        submitted = True
+        try:
+            resp = conn.getresponse()
+            data = resp.read()
+        except (OSError, http.client.HTTPException) as exc:
+            raise DeliveryError(f"no answer from the cloud API after posting: {exc}", uncertain=True) from exc
+    finally:
+        conn.close()
+    if resp.status not in (200, 201, 204):
+        raise DeliveryError(_cloud_refusal(resp.status, data), uncertain=submitted and resp.status >= 500)
+    receipt = {"status": "posted", "messageId": message_id, "session": cse_id}
+    try:
+        result = (json.loads(data or b"{}").get("results") or [{}])[0]
+        if result.get("sequence_num") is not None:
+            receipt["sequenceNum"] = str(result["sequence_num"])
+        if result.get("duplicate"):
+            receipt["duplicate"] = True
+    except (ValueError, AttributeError, IndexError):
+        pass
+    return receipt

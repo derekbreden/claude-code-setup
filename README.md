@@ -3,9 +3,11 @@
 My Claude Code customizations for macOS, plus the Codex half of the relay. Two
 runtimes work this machine — Claude Code sessions and Codex tasks — and the relay
 spans both: either one can read the other's clean transcript, and either one can
-send a message into the other. Native messaging is preferred within each runtime;
-the relay supplies cross-runtime delivery and a fallback when native tools are absent.
-One `install.sh` wires it all into both clients.
+send a message into the other. Claude sessions that are not on this machine — running
+in the cloud from the desktop app's Code tab, or bridged from another computer — are
+read and messaged the same way, through their cloud records. Native messaging is
+preferred within each runtime; the relay supplies cross-runtime delivery and a fallback
+when native tools are absent. One `install.sh` wires it all into both clients.
 
 | Folder | What it is | How it reaches the client |
 | --- | --- | --- |

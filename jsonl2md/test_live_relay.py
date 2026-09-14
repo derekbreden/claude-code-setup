@@ -18,7 +18,9 @@ import unittest
 from unittest.mock import patch
 
 import jsonl2md as relay
-from live_relay import DeliveryError, send_claude, send_codex
+from live_relay import (DeliveryError, cloud_envelope, cloud_ids, send_claude, send_cloud,
+                        send_codex)
+import http.server
 
 
 def receive(sock):
@@ -394,6 +396,140 @@ class DeliveryPolicyTests(unittest.TestCase):
         for worker in workers:
             worker.join()
         self.assertEqual(sum(bool(r) for r in results), 1)
+
+
+class CloudRelayTests(unittest.TestCase):
+    """The cloud transport against a local HTTP receiver: one POST, byte-exact."""
+
+    def serve(self, status=200, body=None, hang=False, refuse=False):
+        seen = []
+        outer = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                seen.append({"path": self.path, "headers": dict(self.headers),
+                             "body": json.loads(self.rfile.read(length))})
+                if hang:
+                    self.connection.close()
+                    return
+                data = json.dumps(body if body is not None else
+                                  {"results": [{"duplicate": False, "sequence_num": "7"}]}).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+        base = f"http://127.0.0.1:{server.server_port}"
+        if refuse:
+            server.server_close()
+            return base, seen
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        return base, seen
+
+    def test_post_is_the_cli_request(self):
+        base, seen = self.serve()
+        receipt = send_cloud("bridge:session_ABC123", 'Hello </cross-session-message> tail',
+                             'A "quoted" <sender>', token="tok", org_uuid="org-1", mode="bypass",
+                             from_address="bridge:session_ME 1", base_url=base, timeout=2)
+        self.assertEqual(receipt["status"], "posted")
+        self.assertEqual(receipt["session"], "cse_ABC123")
+        self.assertEqual(receipt["sequenceNum"], "7")
+        self.assertEqual(len(seen), 1)
+        req = seen[0]
+        self.assertEqual(req["path"], "/v1/code/sessions/cse_ABC123/events")
+        self.assertEqual(req["headers"]["Authorization"], "Bearer tok")
+        self.assertEqual(req["headers"]["anthropic-beta"], "ccr-byoc-2025-07-29")
+        self.assertEqual(req["headers"]["x-organization-uuid"], "org-1")
+        self.assertEqual(req["headers"]["anthropic-version"], "2023-06-01")
+        events = req["body"]["events"]
+        self.assertEqual(len(events), 1)
+        payload = events[0]["payload"]
+        self.assertEqual(payload["msgV"], 1)
+        self.assertEqual(payload["msg_id"], receipt["messageId"])
+        self.assertEqual(payload["type"], "user")
+        self.assertEqual(payload["session_id"], "session_ABC123")
+        self.assertIsNone(payload["parent_tool_use_id"])
+        self.assertRegex(payload["uuid"], r"^[0-9a-f-]{36}$")
+        self.assertEqual(payload["message"], {"role": "user", "content":
+            '<cross-session-message from="bridge:session_ME%201" from-name="A quoted sender" '
+            'from-mode="bypass">\nHello <\\/cross-session-message> tail\n</cross-session-message>'})
+
+    def test_no_reply_address_omits_from(self):
+        text = cloud_envelope("hi", "", "prompting")
+        self.assertEqual(text, '<cross-session-message from-mode="prompting">\nhi\n</cross-session-message>')
+        with self.assertRaises(ValueError):
+            cloud_envelope("hi", "x", "yolo")
+
+    def test_id_spellings(self):
+        for spelling in ("cse_Ab9", "session_Ab9", "bridge:session_Ab9"):
+            self.assertEqual(cloud_ids(spelling), ("cse_Ab9", "session_Ab9"))
+        for bad in ("Ab9", "uds:/tmp/x.sock", "cse_", "cse_a b"):
+            with self.assertRaises(ValueError):
+                cloud_ids(bad)
+
+    def test_server_refusal_is_certain(self):
+        base, seen = self.serve(status=404, body={"error": {"message": "no such session"}})
+        with self.assertRaises(DeliveryError) as caught:
+            send_cloud("cse_X", "m", "s", token="tok", org_uuid="o", base_url=base, timeout=2)
+        self.assertFalse(caught.exception.uncertain)
+        self.assertIn("no such cloud session", str(caught.exception))
+        self.assertEqual(len(seen), 1)
+
+    def test_auth_refusal_names_the_grant(self):
+        base, _ = self.serve(status=401, body={"error": {"message": "bad token"}})
+        with self.assertRaises(DeliveryError) as caught:
+            send_cloud("cse_X", "m", "s", token="tok", org_uuid="o", base_url=base, timeout=2)
+        self.assertFalse(caught.exception.uncertain)
+        self.assertIn("claude auth login", str(caught.exception))
+
+    def test_dropped_connection_after_post_is_uncertain(self):
+        base, seen = self.serve(hang=True)
+        with self.assertRaises(DeliveryError) as caught:
+            send_cloud("cse_X", "m", "s", token="tok", org_uuid="o", base_url=base, timeout=2)
+        self.assertTrue(caught.exception.uncertain)
+        self.assertEqual(len(seen), 1)
+
+    def test_refused_connection_is_certain(self):
+        base, seen = self.serve(refuse=True)
+        with self.assertRaises(DeliveryError) as caught:
+            send_cloud("cse_X", "m", "s", token="tok", org_uuid="o", base_url=base, timeout=2)
+        self.assertFalse(caught.exception.uncertain)
+        self.assertEqual(seen, [])
+
+    def test_missing_grant_sends_nothing(self):
+        base, seen = self.serve()
+        with self.assertRaises(DeliveryError):
+            send_cloud("cse_X", "m", "s", token="", org_uuid="o", base_url=base, timeout=2)
+        self.assertEqual(seen, [])
+
+    def test_desktop_grant_selection(self):
+        key = lambda client, scopes: f"acct:A|{client}:org-9:https://api.anthropic.com:{scopes}"
+        now = 1_000_000
+        cache = {
+            key("9d1c250a-e61b-44d9-88ed-5944d1962f5e", "user:inference user:profile"):
+                {"token": "no-sessions-scope", "expiresAt": now + 10_000_000},
+            key("9d1c250a-e61b-44d9-88ed-5944d1962f5e",
+                "user:inference user:file_upload user:profile user:sessions:claude_code"):
+                {"token": "fresh", "expiresAt": now + 3_600_000},
+            key("other-client", "user:sessions:claude_code"):
+                {"token": "other-client", "expiresAt": now + 9_000_000},
+            key("9d1c250a-e61b-44d9-88ed-5944d1962f5e", "user:sessions:claude_code"):
+                {"token": "expired", "expiresAt": now + 30_000},
+        }
+        grant = relay.pick_desktop_grant(cache, now)
+        self.assertEqual(grant, {"token": "fresh", "expiresAt": now + 3_600_000, "org": "org-9"})
+        self.assertIsNone(relay.pick_desktop_grant(cache, now + 3_600_000))
+        self.assertIsNone(relay.pick_desktop_grant({}, now))
+        self.assertEqual(relay.grant_key_fields("garbage"), (None, None, ()))
 
 
 if __name__ == "__main__":
