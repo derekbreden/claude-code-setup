@@ -11,6 +11,11 @@ Two runtimes work this machine and one verb reaches both — `send` resolves the
 - a **Claude Code session** gets a file in its relay mailbox, which its delivery hook injects on that session's **next tool call**. Poll-on-action, not push: a working agent gets it within a tool call or two; a fully idle one waits until it next acts.
 - a **Codex task** gets it through `codex queue`, delivered as a follow-up turn. A running task is interrupted at the end of its current turn; a parked one takes it when it next runs. The tool says which of the two happened.
 
+These are fallback transports. A Claude caller with a native peer address uses `SendMessage`;
+a Codex caller targeting another Codex task uses `mcp__codex_app__send_message_to_thread`.
+`send` redirects those callers without delivering anything. Use `--force-relay` when the
+named native tool is unavailable. Claude-to-Codex delivery continues through `codex queue`.
+
 Request: **$ARGUMENTS**
 
 Steps:
@@ -42,7 +47,7 @@ python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py await-reply <YOUR OWN
 
 Run the second one with **`run_in_background: true`**. It blocks until something lands in your mailbox and then exits, and that exit is your wake-up — one notification, no polling on your part. `--timeout 0` waits indefinitely; the default hour is usually the right ceiling.
 
-- **`--reply-to` is your own id, not the target's.** It rides along as a return address, and the receiving agent is told plainly that you are parked and that silence blocks you. A Codex receiver gets the literal shell command that reaches you, since it has no relay tooling of its own beyond this same script.
+- **`--reply-to` is your own id, not the target's.** It rides along as a return address, and the receiving agent is told plainly that you are parked and that silence blocks you. A Codex receiver gets the literal shell command that reaches your Claude mailbox; its native task messaging tool cannot address a Claude session.
 - **Your own id is in your scratchpad path** — `/tmp/claude-<uid>/<project>/<SESSION-ID>/scratchpad`. `await-reply` will not infer it, deliberately: the freshest transcript in a shared project belongs to the session you are waiting *on*, so guessing picks exactly the wrong mailbox and then waits forever in silence.
 - **It does not drain the mailbox.** The delivery hook still hands you the full text, properly framed, on your next tool call; `await-reply` only tells you someone answered.
 

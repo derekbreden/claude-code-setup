@@ -106,10 +106,9 @@ def _latest_codex_db(stem):
 CODEX_STATE_DB = _latest_codex_db("state")
 CODEX_HISTORY_DB = _latest_codex_db("thread_history")
 
-# The Codex CLI ships inside the desktop app. `codex queue` is the only
-# sanctioned way to put a message into a running Codex thread, so it is the
-# write half of this file's Codex support -- the read half being the two
-# sqlite projections above. `CODEX_CLI` overrides the search for a fork.
+# Codex agents prefer the native send_message_to_thread tool. `codex queue`
+# supplies this script's fallback for callers without that tool; the read half
+# uses the two sqlite projections above. `CODEX_CLI` overrides the CLI search.
 CODEX_CLI_CANDIDATES = (
     os.environ.get("CODEX_CLI") or "",
     "/Applications/ChatGPT.app/Contents/Resources/codex",
@@ -498,11 +497,9 @@ def codex_dialogue(thread_id, rollout_path=None):
 
 # --- the write half: a message INTO a Codex task ------------------------------
 #
-# Claude's relay is a file mailbox drained by a PreToolUse hook. Codex has no
-# hook surface, but it ships the same capability first-party: `codex queue`
-# hands a message to the app-server daemon, which delivers it to a running
-# thread the way a typed follow-up arrives. So the two runtimes differ only in
-# transport, and `send` picks the transport from the target.
+# Claude's relay is a file mailbox drained by a PreToolUse hook. The Codex
+# fallback uses `codex queue` to hand a follow-up to the app-server daemon.
+# Codex callers are directed to native task messaging before using this path.
 #
 # `codex queue` reaches ACTIVE sessions only -- a thread the daemon is not
 # holding open resolves to nothing and exits 1. That is a real difference from
@@ -1714,7 +1711,9 @@ def cmd_board(args):
                      _ms_stamp(s.get("lastActivityAt"))))
     try:
         for t in list_codex_sessions(args.cwd):
-            rows.append(("codex", t["title"], f'send "{t["title"]}"',
+            reach = (f'send_message_to_thread threadId: {t["id"]}' if caller_is_codex()
+                     else f'send "{t["title"]}"')
+            rows.append(("codex", t["title"], reach,
                          _ms_stamp(t.get("recency_at_ms"))))
     except FileNotFoundError:
         sys.stderr.write("[board] no Codex state db found; listing Claude only.\n")
@@ -2046,8 +2045,31 @@ def caller_has_peer_channel():
     return bool(os.environ.get("CLAUDECODE"))
 
 
+def caller_is_codex():
+    """A Codex shell; tool availability is checked by the agent, not this process.
+
+    A Claude process launched under Codex can inherit CODEX_THREAD_ID, so its
+    own runtime marker takes precedence. --force-relay covers Codex callers
+    whose tool list does not expose native task messaging.
+    """
+    return bool(os.environ.get("CODEX_THREAD_ID")) and not caller_has_peer_channel()
+
+
 def _send_codex(args, target):
     """Deliver into a Codex task through `codex queue`."""
+    if caller_is_codex() and not args.force_relay:
+        native_args = json.dumps({"threadId": target["id"],
+                                  "prompt": "From <your task title>: <your message>"})
+        sys.stderr.write(
+            f"[relay] {target['label']!r} is a Codex task and you are a Codex caller.\n"
+            f"[relay] Prefer native task messaging:\n"
+            f"[relay]   mcp__codex_app__send_message_to_thread({native_args})\n"
+            f"[relay] Confirm the target with list_threads; use its hostId when supplied.\n"
+            f"[relay] Include your own task title and threadId if you need an answer.\n"
+            f"[relay] Nothing was sent. If that tool is unavailable in your tool list,\n"
+            f"[relay] re-run with --force-relay to use codex queue.\n"
+        )
+        return 1
     if args.mode == "nudge":
         sys.stderr.write(
             "[relay] --mode nudge has no Codex equivalent: a queued message is delivered\n"
@@ -2201,8 +2223,11 @@ examples:
   jsonl2md.py delta "PCB clean" --tail 2   # just the last 2 exchanges
   jsonl2md.py watch "PCB clean"            # stream new turns live as they land
 
-  # Interject into another live session. FIRST CHECK HOW TO REACH IT — list-sessions
-  # prints the address beside every title:
+  # Interject into another live session. FIRST CHECK HOW TO REACH IT — board
+  # lists both runtimes. A Codex caller sending to a Codex task is directed to
+  # mcp__codex_app__send_message_to_thread; --force-relay keeps the CLI fallback
+  # available when the caller's tool list does not expose that tool.
+  # list-sessions prints Claude peer addresses:
   #
   #   Condenser           → SendMessage to: Condenser
   #   Build time          → relay only (no peer channel)
@@ -2234,12 +2259,7 @@ examples:
 # --- selftest ----------------------------------------------------------------
 
 def cmd_selftest(args):
-    """Hold the two rules the fleet's automated callers depend on.
-
-    Both are silent when broken. A gate that cannot see the human reports a
-    quiet hour and the routine simply does not run; an --exclude that misses
-    reads the helper's own work back to it as a peer's. Neither raises, so
-    neither is noticed without a case that fails."""
+    """Check speech, session exclusion, and message routing without live delivery."""
     cases, failed = [], []
 
     def check(name, got, want):
@@ -2338,6 +2358,55 @@ def cmd_selftest(args):
         (globals()["list_sessions"], globals()["peer_addresses"],
          globals()["_peer_idle_module"], globals()["session_prompts"],
          globals()["is_cloud"]) = saved
+
+    # Message routing: a native redirect must not queue or write a mailbox;
+    # cross-runtime callers and explicit fallback still deliver exactly once.
+    from contextlib import redirect_stderr, redirect_stdout
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    routing_cases = [
+        ("Codex to Codex redirects", {"CODEX_THREAD_ID": "caller"}, "codex", False, 1, 0, 0),
+        ("Codex forced fallback", {"CODEX_THREAD_ID": "caller"}, "codex", True, 0, 1, 0),
+        ("Claude to Codex queues", {"CLAUDECODE": "1"}, "codex", False, 0, 1, 0),
+        ("shell to Codex queues", {}, "codex", False, 0, 1, 0),
+        ("nested Claude to Codex queues", {"CLAUDECODE": "1", "CODEX_THREAD_ID": "caller"},
+         "codex", False, 0, 1, 0),
+        ("Codex to Claude uses mailbox", {"CODEX_THREAD_ID": "caller"}, "claude", False, 0, 0, 1),
+        ("Claude peer redirects", {"CLAUDECODE": "1"}, "claude", False, 1, 0, 0),
+        ("Claude forced mailbox", {"CLAUDECODE": "1"}, "claude", True, 0, 0, 1),
+    ]
+    for name, runtime_env, kind, force, want_rc, want_queue, want_mail in routing_cases:
+        target = {"kind": kind, "id": "target-id", "label": "Target"}
+        ns = types.SimpleNamespace(title="Target", cwd="/tmp", kind=None,
+                                   force_relay=force, mode="interrupt", text="routing check",
+                                   sender="Caller", reply_to=None)
+        output = io.StringIO()
+        with TemporaryDirectory() as inbox, \
+                patch.dict(os.environ, runtime_env, clear=True), \
+                patch.dict(globals(), {
+                    "RELAY_INBOX_ROOT": inbox,
+                    "resolve_any_target": lambda *a: target,
+                    "peer_addresses": lambda: {"target-id": {"name": "Target"}},
+                    "_codex_queue_pending": lambda *a: False,
+                }), \
+                patch(__name__ + ".codex_queue", return_value=(True, "queued")) as queue, \
+                redirect_stdout(output), redirect_stderr(output):
+            rc = cmd_send(ns)
+            mail = glob.glob(os.path.join(inbox, "*", "*.json"))
+            check(name + ": result", rc or 0, want_rc)
+            check(name + ": queue count", queue.call_count, want_queue)
+            check(name + ": mailbox count", len(mail), want_mail)
+            if want_queue:
+                check(name + ": queue destination", queue.call_args.args[0], "target-id")
+            if want_mail and mail:
+                with open(mail[0]) as f:
+                    message = json.load(f)
+                check(name + ": mailbox destination", os.path.basename(os.path.dirname(mail[0])),
+                      "target-id")
+                check(name + ": mailbox payload", (message["text"], message["from"]),
+                      ("routing check", "Caller"))
+            if kind == "codex" and want_rc == 1:
+                check(name + ": native address", '"threadId": "target-id"' in output.getvalue(), True)
 
     for f in failed:
         sys.stderr.write("FAIL " + f + "\n")
@@ -2542,10 +2611,8 @@ def main():
                         help="disambiguate when one title names a session in both runtimes "
                              "(default: resolve across both and fail loud on a collision)")
     p_send.add_argument("--force-relay", action="store_true",
-                        help="use the file mailbox even when the target is on the native peer "
-                             "channel (default: refuse and print the SendMessage call to use, "
-                             "but only for a Claude Code caller -- a caller without that tool "
-                             "is routed to the mailbox automatically)")
+                        help="use the mailbox or codex queue instead of a native messaging "
+                             "redirect (for callers whose native tool is unavailable)")
     p_send.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
     p_send.set_defaults(func=cmd_send)
 

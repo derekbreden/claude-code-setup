@@ -127,12 +127,10 @@ the same as the titled half.
 ./jsonl2md.py selftest      # prints N/N, exits 1 on failure
 ```
 
-Two rules here fail silently when they break, which is why they are the ones held. A gate that
-cannot see the human reports a quiet hour and the routine simply does not run. An `--exclude`
-that misses reads a helper's own work back to it as a peer's. Neither raises, neither shows up
-in output anyone reads, and both would sit broken indefinitely. Each case was checked against
-a deliberately broken copy of the code it guards, so a case that stops holding fails rather
-than passing on a mutation.
+The checks cover user speech, exclusion of the caller's own session, and message routing.
+Routing cases use a mocked Codex queue and temporary Claude mailboxes: native redirects send
+nothing, cross-runtime messages reach the requested destination once, and `--force-relay`
+retains the fallback. No test sends to a live agent.
 
 ### Reading everything at once: `--compact`
 

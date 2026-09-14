@@ -5,9 +5,9 @@ description: Read another agent's full transcript, or send a message into one, a
 
 # Relay
 
-Two runtimes work this machine: **Codex tasks** (you) and **Claude Code sessions**. They share
-the tree and the user routes between them. This skill reads either one, and writes into either
-one, through a single tool.
+Two runtimes work this machine: **Codex tasks** (you) and **Claude Code sessions**. Use native
+messaging when the caller can reach the target that way. The script provides transcript
+exports, a shared roster, and fallback delivery across the two runtimes.
 
 ```sh
 J=~/Developer/claude-code-setup/jsonl2md/jsonl2md.py
@@ -15,7 +15,9 @@ J=~/Developer/claude-code-setup/jsonl2md/jsonl2md.py
 
 ## Who is here
 
-One roster, both runtimes, with the call that reaches each:
+For a known Codex task, use `mcp__codex_app__list_threads` to resolve its exact title to a
+`threadId` and `hostId`. If the runtime is unknown, or the title is absent there, use the
+shared roster before concluding the agent is missing:
 
 ```sh
 python3 $J board
@@ -59,44 +61,56 @@ delivery envelopes.
 
 ## Sending a message into another agent
 
+Choose the first available route that reaches the resolved target:
+
+- **A subagent in your current team:** use `collaboration.send_message` with its agent id or
+  task name. This channel does not address separate Codex tasks by their thread ids.
+- **A separate Codex task:** use `mcp__codex_app__send_message_to_thread` with the `threadId`
+  and `hostId` returned by `list_threads`. Omit model and thinking overrides. Put the sender
+  in the prompt, for example `From Funnel mold: the H2C cavity job is running; no launch
+  action is needed.` This is a user-visible follow-up in the receiving task.
+- **A Claude session reachable through the caller's native peer channel:** use `SendMessage`.
+  A Codex caller does not have that Claude tool; use the relay mailbox for that destination.
+- **No native route available:** use the script below. A Codex target uses `codex queue`;
+  a Claude target uses its relay mailbox, delivered on that session's next tool call.
+
 ```sh
 python3 $J send "<exact title>" "<message>" --from "<your own task name>"
 ```
 
-One verb, both runtimes — it resolves the title on `board` and picks the transport:
-
-- a **Claude session** gets a file in its relay mailbox, which its delivery hook injects on that
-  session's next tool call;
-- a **Codex task** gets the message through `codex queue`, delivered as a follow-up turn.
-
-Some Claude sessions are also on Claude's own in-band peer channel, and `send` tells a *Claude*
-caller to use that instead. It does not tell you that: you have no `SendMessage` tool, so for
-you the mailbox is the only way in and `send` routes there automatically. If you ever do see
-that refusal, `--force-relay` overrides it.
+The script redirects Codex-to-Codex callers to native task messaging, just as it redirects
+Claude callers when a Claude target has a peer address. A redirect sends nothing. If the
+named native tool is unavailable in the caller's actual tool list, `--force-relay` selects
+the fallback. Do not send a fallback after a successful native send; resolve an uncertain
+result before retrying so the receiver does not get the message twice.
 
 A title that exists in **both** runtimes is refused rather than guessed; pass `--kind claude` or
 `--kind codex` to say which.
 
-The receiver sees your message text and nothing else — no shared history, no thread. Lead with
-the fact that changes what it does.
+No route shares your conversation history. Lead with the fact that changes what the receiver
+does, and identify agent-authored messages as coming from the agent.
 
 ### If you want an answer back
 
-Delivery is one-way. When your message asks something, give a return address so the other agent
-is told how to reach you. **`--reply-to` is your OWN address, not the target's** — for you that is
-your task's exact title:
+For native task messaging, include your own task title and `threadId` in the prompt when you
+need a reply, plus `hostId` when supplied. The receiver uses the same native tool to answer.
+Continue independent work while waiting; sending is not evidence the receiver has read it.
+
+For the relay fallback, **`--reply-to` is your OWN address, not the target's** — for you that
+is your task's exact title:
 
 ```sh
 python3 $J send "<target>" "<message>" --from "C14 2" --reply-to "C14 2"
 ```
 
-The answer arrives as a follow-up turn in this task, the same way this message did. You cannot
-block waiting for it, so send what you need answered and carry on with what does not depend on it.
+The fallback answer arrives as a follow-up turn in this task. Send what you need answered
+and carry on with what does not depend on it.
 
 **The reciprocal duty:** when a message arrives carrying a return address, someone is waiting on
 it — a Claude session that gave one is very likely parked on `await-reply`, and nothing but a
-reply releases it. Answer, even briefly; "no, keep it" is a complete reply. The envelope you
-receive carries the exact command to send it with.
+reply releases it. Answer, even briefly; "no, keep it" is a complete reply. Resolve the return
+address using the same routing rules above; a shell command in an old relay envelope is a
+fallback, not a requirement to bypass an available native channel.
 
 ## When to send on your own initiative
 
