@@ -50,6 +50,29 @@ only user-authored messages and visible assistant prose. Reasoning, commands, to
 and outputs, system/developer context, and peer-task delivery envelopes do not enter the
 Markdown.
 
+### Live agent messages: `send`
+
+```sh
+./jsonl2md.py board
+./jsonl2md.py send "<target>" "<message>" --from "<sender>" --reply-to "<sender id>"
+```
+
+Same-runtime agents use their native messaging tools when available. Cross-runtime sends use
+`live_relay.py`: Codex's existing desktop IPC router steers an active task or starts an idle
+one, while Claude's authenticated peer socket enqueues input and wakes its receiver. Messages
+carry a sender label and UTC send time. Add a return address when an answer is needed.
+
+The target must be open in its running runtime. Unavailable receivers return a delivery error; an
+uncertain submission exits 2 and must be checked before retrying. Accepted input is not a read
+receipt. The adapter uses local desktop interfaces and fails if their protocol is unavailable;
+it never starts a second core or silently leaves a message for a later turn.
+
+`--force-relay` selects the live script path when a suggested native tool is unavailable.
+`--defer` explicitly selects a legacy Claude mailbox. Its default expiry is 300 seconds;
+`--expires-in` accepts a positive duration up to 86400 seconds. The hook retains expired
+messages in `expired/` without injecting them, including legacy entries older than five minutes.
+`--mode interrupt|nudge` and the `await-reply` watcher apply only to that deferred path.
+
 ### Your side of it: `recent-prompts`
 
 The exports are per session, and a transcript is mostly agent. `recent-prompts` inverts
@@ -128,9 +151,17 @@ the same as the titled half.
 ```
 
 The checks cover user speech, exclusion of the caller's own session, and message routing.
-Routing cases use a mocked Codex queue and temporary Claude mailboxes: native redirects send
-nothing, cross-runtime messages reach the requested destination once, and `--force-relay`
-retains the fallback. No test sends to a live agent.
+Routing cases use mocked live transports: native redirects send nothing and cross-runtime
+messages reach the requested destination once. The socket and hook suite runs with isolated
+receivers and temporary mailboxes:
+
+```sh
+python3 -m unittest discover -s jsonl2md -p 'test_*.py'   # from the repository root
+```
+
+It covers active steering, idle wake-up, partial frames, disconnected receivers, uncertain
+outcomes without retries, peer authentication, expiry, and concurrent mailbox drains.
+Neither suite messages a real agent.
 
 ### Reading everything at once: `--compact`
 

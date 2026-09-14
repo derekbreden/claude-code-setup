@@ -7,7 +7,7 @@ description: Read another agent's full transcript, or send a message into one, a
 
 Two runtimes work this machine: **Codex tasks** (you) and **Claude Code sessions**. Use native
 messaging when the caller can reach the target that way. The script provides transcript
-exports, a shared roster, and fallback delivery across the two runtimes.
+exports, a shared roster, and live delivery across the two runtimes.
 
 ```sh
 J=~/Developer/claude-code-setup/jsonl2md/jsonl2md.py
@@ -70,9 +70,10 @@ Choose the first available route that reaches the resolved target:
   in the prompt, for example `From Funnel mold: the H2C cavity job is running; no launch
   action is needed.` This is a user-visible follow-up in the receiving task.
 - **A Claude session reachable through the caller's native peer channel:** use `SendMessage`.
-  A Codex caller does not have that Claude tool; use the relay mailbox for that destination.
-- **No native route available:** use the script below. A Codex target uses `codex queue`;
-  a Claude target uses its relay mailbox, delivered on that session's next tool call.
+  A Codex caller reaches that same live receiver with the script below.
+- **Cross-runtime or no native tool available:** use the script below. It steers an active
+  Codex task or starts an idle task, and submits directly to a Claude peer receiver, which
+  wakes an idle session. The target must be open in its running desktop runtime.
 
 ```sh
 python3 $J send "<exact title>" "<message>" --from "<your own task name>"
@@ -81,8 +82,9 @@ python3 $J send "<exact title>" "<message>" --from "<your own task name>"
 The script redirects Codex-to-Codex callers to native task messaging, just as it redirects
 Claude callers when a Claude target has a peer address. A redirect sends nothing. If the
 named native tool is unavailable in the caller's actual tool list, `--force-relay` selects
-the fallback. Do not send a fallback after a successful native send; resolve an uncertain
-result before retrying so the receiver does not get the message twice.
+the live script transport. A failed live send does not create a delayed queue. Exit status
+2 means delivery is uncertain: inspect the receiver before retrying. Never repeat an accepted
+send just because the receiver has not answered yet.
 
 A title that exists in **both** runtimes is refused rather than guessed; pass `--kind claude` or
 `--kind codex` to say which.
@@ -96,21 +98,24 @@ For native task messaging, include your own task title and `threadId` in the pro
 need a reply, plus `hostId` when supplied. The receiver uses the same native tool to answer.
 Continue independent work while waiting; sending is not evidence the receiver has read it.
 
-For the relay fallback, **`--reply-to` is your OWN address, not the target's** — for you that
-is your task's exact title:
+With the script, **`--reply-to` is your OWN address, not the target's**. Prefer your stable
+task id; an exact, unambiguous title also works:
 
 ```sh
 python3 $J send "<target>" "<message>" --from "C14 2" --reply-to "C14 2"
 ```
 
-The fallback answer arrives as a follow-up turn in this task. Send what you need answered
-and carry on with what does not depend on it.
+Live replies enter the active turn or wake the idle receiver. No `await-reply` watcher is
+needed. Continue independent work while waiting. Answer a question or send a correction when
+it changes what the sender should do. A reply does not itself need `--reply-to`.
 
-**The reciprocal duty:** when a message arrives carrying a return address, someone is waiting on
-it — a Claude session that gave one is very likely parked on `await-reply`, and nothing but a
-reply releases it. Answer, even briefly; "no, keep it" is a complete reply. Resolve the return
-address using the same routing rules above; a shell command in an old relay envelope is a
-fallback, not a requirement to bypass an available native channel.
+### Legacy Claude sessions
+
+When a Claude session has no live receiver, open it in a current runtime. If delivery on its
+next tool call is specifically wanted, use `--defer --expires-in 300`. This explicit mailbox
+path does not wake an idle session; `--mode interrupt|nudge` applies only here. Expired messages
+are retained under the mailbox's `expired/` directory and omitted from delivery. The default
+lifetime is five minutes, including old mailbox entries without an explicit expiry.
 
 ## When to send on your own initiative
 
