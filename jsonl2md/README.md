@@ -70,8 +70,9 @@ it for its user otherwise.
 
 A cloud session cannot post back — the server accepts its credential for its own work only —
 so its way back is a mark in its own reply, `<relay to="Time">…</relay>`, and the `cloud-inbox`
-verb: a watcher that tails every live cloud session and delivers each mark into the named local
-session (or Codex task) over the same transport a local `send` uses. A name that matches nothing
+verb: a watcher that holds every live cloud session's event stream open (the CLI's own SSE
+endpoint; `--poll` falls back to a 4 s poll) and delivers each mark into the named local session
+(or Codex task) over the same transport a local `send` uses. A name that matches nothing
 is answered in place with the names that do. A second mark, `<relay read="Time" tail="40"/>`,
 reads instead: the watcher renders that session's clean transcript here and posts it into the
 cloud session in parts, which is what `/relay` does for a session with no disk to pull from.

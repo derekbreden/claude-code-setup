@@ -28,17 +28,21 @@ address one of them instead of waiting for an answer that will never come.
 """
 
 import glob
+import http.client
 import json
 import os
 import re
 import shlex
+import socket
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from urllib.parse import quote, urlsplit
 
 import jsonl2md as relay
-from live_relay import DeliveryError, send_claude, send_cloud, send_codex
+from live_relay import CLOUD_API, CLOUD_UA, DeliveryError, send_claude, send_cloud, send_codex
 
 TAG_RE = re.compile(
     r"""<relay\s+to=(["'])([^"'<>\n]{1,120})\1\s*>[ \t]*\r?\n?(.*?)\r?\n?[ \t]*</relay\s*>""",
@@ -55,6 +59,9 @@ MARK_EXPIRY = 600          # a mark older than this at first sight is bounced, n
 BACKFILL_WINDOW = 600      # a session this young is read from its first event, not its head
 ROSTER_TTL = 10            # how stale the cloud session list may be between passes
 SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+STREAM_LIVENESS = 45       # the CLI's own rule: a stream silent this long is dead
+STREAM_CONNECT = 30
+STREAM_BACKOFF_MAX = 30
 SEEN_KEEP = 200
 GRANT_REFRESH = 600
 LIVE_WORKERS = ("running", "idle", "requires_action")
@@ -294,6 +301,142 @@ def resolve_local(name, cwd):
     return None, None, sorted(candidates)
 
 
+class StreamClosed(Exception):
+    """The server said this session is over for us (401 after a refresh, 403, 404)."""
+
+
+def parse_sse(lines):
+    """SSE blocks from an iterable of decoded lines: `{"event", "id", "data",
+    "comment"}` per block. Field syntax as the CLI reads it: a `:` line is a
+    comment (a keepalive), a line without `:` is ignored, `data` lines join
+    with newlines, one leading space is stripped from a value."""
+    block = {"event": None, "id": None, "data": [], "comment": False}
+    for raw in lines:
+        line = raw.rstrip("\r\n")
+        if line == "":
+            if block["data"] or block["comment"]:
+                yield {"event": block["event"], "id": block["id"],
+                       "data": "\n".join(block["data"]) if block["data"] else None,
+                       "comment": block["comment"]}
+            block = {"event": None, "id": None, "data": [], "comment": False}
+            continue
+        if line.startswith(":"):
+            block["comment"] = True
+            continue
+        if ":" not in line:
+            continue
+        field, _, value = line.partition(":")
+        if value.startswith(" "):
+            value = value[1:]
+        if field == "data":
+            block["data"].append(value)
+        elif field in ("event", "id"):
+            block[field] = value
+
+
+class SessionStream(threading.Thread):
+    """One live connection to a cloud session's event stream, redialled with
+    backoff until the session is gone. Every client_event goes through the
+    same `handle` the poller uses; the cursor is the SSE id."""
+
+    def __init__(self, inbox, cse_id, title, *, base_url=CLOUD_API, liveness=STREAM_LIVENESS,
+                 connect_timeout=STREAM_CONNECT, backoff_max=STREAM_BACKOFF_MAX):
+        super().__init__(name=f"stream-{cse_id}", daemon=True)
+        self.inbox, self.cse_id, self.title = inbox, cse_id, title
+        self.base_url, self.liveness = base_url, liveness
+        self.connect_timeout, self.backoff_max = connect_timeout, backoff_max
+        self.stop_event = threading.Event()
+        self.closed_reason = None
+        self.connections = 0
+
+    def stop(self):
+        self.stop_event.set()
+
+    def request(self, token, org):
+        cursor = self.inbox.state.cursor(self.cse_id)
+        url = urlsplit(self.base_url)
+        path = f"{url.path.rstrip('/')}/v1/code/sessions/{quote(self.cse_id, safe='')}/events/stream"
+        headers = {"Authorization": f"Bearer {token}", "Accept": "text/event-stream",
+                   "anthropic-version": "2023-06-01", "anthropic-client-platform": "claude_code",
+                   "User-Agent": CLOUD_UA, "x-organization-uuid": org or ""}
+        if cursor not in (None, "0"):
+            path += f"?from_sequence_num={quote(str(cursor), safe='')}"
+            headers["Last-Event-ID"] = str(cursor)
+        conn_cls = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
+        conn = conn_cls(url.hostname, url.port, timeout=self.connect_timeout)
+        conn.request("GET", path, headers=headers)
+        return conn
+
+    def stream_once(self, refreshed=False):
+        """Hold one connection until it ends. Raises StreamClosed when the
+        server refuses the session for good; any other end means redial."""
+        token = self.inbox.token()
+        conn = self.request(token, relay._org_uuid())
+        self.connections += 1
+        try:
+            resp = conn.getresponse()
+            if resp.status == 401 and not refreshed:
+                relay._DESKTOP_GRANT.clear()
+                conn.close()
+                return self.stream_once(refreshed=True)
+            if resp.status in (401, 403, 404):
+                raise StreamClosed(f"HTTP {resp.status}")
+            if resp.status != 200:
+                raise OSError(f"HTTP {resp.status}")
+            conn.sock.settimeout(self.liveness)
+            def lines():
+                while not self.stop_event.is_set():
+                    raw = resp.readline()
+                    if not raw:
+                        return
+                    yield raw.decode("utf-8", "replace")
+            for block in parse_sse(lines()):
+                if block["event"] == "client_event" and block["data"]:
+                    self.on_event(block)
+                elif block["event"] == "catch_up_truncated":
+                    self.inbox.log(f"[inbox] {self.title!r}: stream skipped a gap in the transcript")
+        finally:
+            conn.close()
+
+    def on_event(self, block):
+        try:
+            event = json.loads(block["data"])
+        except ValueError:
+            return
+        seq = block["id"] or event.get("sequence_num")
+        if seq is None:
+            return
+        with self.inbox.lock:
+            cursor = self.inbox.state.cursor(self.cse_id)
+            try:
+                if cursor is not None and int(seq) <= int(cursor):
+                    return
+            except (TypeError, ValueError):
+                pass
+            event.setdefault("sequence_num", seq)
+            self.inbox.handle(self.cse_id, self.title, [event])
+            self.inbox.state.set_cursor(self.cse_id, str(seq))
+            self.inbox.state.save()
+
+    def run(self):
+        attempts = 0
+        while not self.stop_event.is_set():
+            try:
+                self.stream_once()
+                attempts = 0                          # a clean end: redial promptly
+                delay = 1
+            except StreamClosed as exc:
+                self.closed_reason = str(exc)
+                self.inbox.log(f"[inbox] {self.title!r}: stream closed for good ({exc})")
+                return
+            except (OSError, http.client.HTTPException, socket.timeout, relay.TranscriptError) as exc:
+                attempts += 1
+                delay = min(2 ** (attempts - 1), self.backoff_max)
+                self.inbox.log(f"[inbox] {self.title!r}: stream dropped ({type(exc).__name__}: {exc}); "
+                               f"redial in {delay}s")
+            self.stop_event.wait(delay)
+
+
 class Inbox:
     def __init__(self, *, interval=4.0, only=None, cwd=relay.DEFAULT_CWD, state=None,
                  log=None, clock=time.time, roster_ttl=ROSTER_TTL):
@@ -301,10 +444,13 @@ class Inbox:
         self.only = list(only or [])
         self.cwd = cwd
         self.state = state or InboxState()
-        self.log = log or (lambda line: sys.stderr.write(line + "\n"))
+        self.log = log or (lambda line: sys.stderr.write(
+            time.strftime("%H:%M:%S ", time.gmtime()) + line + "\n"))
         self.clock = clock
         self.roster_ttl = roster_ttl
         self.grant_read_at = 0
+        self.lock = threading.RLock()
+        self.streams = {}
 
     # -- roster ---------------------------------------------------------------
     def watched(self):
@@ -330,22 +476,31 @@ class Inbox:
                 and (s.get("worker_status") in LIVE_WORKERS or not s.get("worker_status"))]
 
     # -- one session ----------------------------------------------------------
+    def first_sight(self, session):
+        """Place the cursor for a session seen for the first time: at its first
+        event when it is young, at its head otherwise. True when placed."""
+        cse_id, title = session["id"], session["title"]
+        created = session.get("created")
+        if created is not None and self.clock() - created < BACKFILL_WINDOW:
+            self.state.set_cursor(cse_id, "0")         # young: its first marks are not missed
+            self.log(f"[inbox] watching {title!r} ({cse_id}) from its first event")
+            return True
+        head = relay.cloud_head_sequence(cse_id)
+        if head is None:
+            return False                              # nothing said yet; look again next pass
+        self.state.set_cursor(cse_id, head)
+        self.log(f"[inbox] watching {title!r} ({cse_id}) from event {head}")
+        return True
+
     def poll(self, session):
         cse_id, title = session["id"], session["title"]
         cursor = self.state.cursor(cse_id)
         if cursor is None:
-            created = session.get("created")
-            if created is not None and self.clock() - created < BACKFILL_WINDOW:
-                self.state.set_cursor(cse_id, "0")     # young: its first marks are not missed
-                self.log(f"[inbox] watching {title!r} ({cse_id}) from its first event")
-            else:
-                head = relay.cloud_head_sequence(cse_id)
-                if head is None:
-                    return 0                  # nothing said yet; look again next pass
-                self.state.set_cursor(cse_id, head)
-                self.log(f"[inbox] watching {title!r} ({cse_id}) from event {head}")
+            if not self.first_sight(session):
                 return 0
             cursor = self.state.cursor(cse_id)
+            if cursor != "0":
+                return 0
         events = relay.cloud_events(cse_id, after=cursor)
         if not events:
             return 0
@@ -480,3 +635,44 @@ class Inbox:
         while True:
             self.pass_once()
             time.sleep(self.interval)
+
+    # -- streaming ------------------------------------------------------------
+    def reconcile_streams(self, stream_factory=None):
+        """Open a stream for every live session that has none, close the ones
+        whose session is gone. Returns the number of live streams."""
+        sessions = self.watched()
+        if sessions is None:
+            return len(self.streams)
+        live = {s["id"]: s for s in sessions}
+        for cse_id, stream in list(self.streams.items()):
+            if cse_id not in live or not stream.is_alive():
+                if cse_id in live and stream.closed_reason:
+                    live.pop(cse_id)                  # refused for good: do not redial this pass
+                stream.stop()
+                del self.streams[cse_id]
+        with self.lock:
+            self.state.forget(set(live) | set(self.streams))
+        for cse_id, session in live.items():
+            if cse_id in self.streams:
+                continue
+            with self.lock:
+                if self.state.cursor(cse_id) is None and not self.first_sight(session):
+                    continue
+            stream = (stream_factory or SessionStream)(self, cse_id, session["title"])
+            stream.start()
+            self.streams[cse_id] = stream
+        with self.lock:
+            self.state.save()
+        return len(self.streams)
+
+    def run_streams(self, stream_factory=None, forever=True):
+        self.log("[inbox] streaming cloud sessions live"
+                 + (f" (only {', '.join(self.only)})" if self.only else ""))
+        while True:
+            try:
+                self.reconcile_streams(stream_factory)
+            except Exception as exc:
+                self.log(f"[inbox] roster pass failed: {type(exc).__name__}: {exc}")
+            if not forever:
+                return
+            time.sleep(self.roster_ttl)

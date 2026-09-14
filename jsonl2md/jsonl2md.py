@@ -2393,7 +2393,10 @@ def cmd_cloud_inbox(args):
         sys.stderr.write(f"[inbox] one pass: {n} delivered\n")
         return 0
     try:
-        inbox.run()
+        if args.poll:
+            inbox.run()
+        else:
+            inbox.run_streams()
     except KeyboardInterrupt:
         sys.stderr.write("\n[inbox] stopped.\n")
     return 0
@@ -2781,7 +2784,9 @@ def main():
         epilog=EPILOG,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    p_inbox.add_argument("--interval", type=float, default=4.0, help="poll seconds (default: 4)")
+    p_inbox.add_argument("--poll", action="store_true",
+                         help="poll each session's events instead of holding its live stream")
+    p_inbox.add_argument("--interval", type=float, default=4.0, help="--poll seconds (default: 4)")
     p_inbox.add_argument("--session", action="append", metavar="CSE_ID",
                          help="watch exactly this cloud record (repeatable; default: every live "
                               "session on Anthropic's machines)")
