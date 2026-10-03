@@ -2143,6 +2143,57 @@ def caller_is_codex():
     return bool(os.environ.get("CODEX_THREAD_ID")) and not caller_has_peer_channel()
 
 
+def own_session_name(cwd=DEFAULT_CWD):
+    """The calling agent's own session, by the title you see for it.
+
+    Claude Code exports CLAUDE_CODE_SESSION_ID to every command it runs, and the desktop
+    app's record for that id holds the sidebar title. titleSource "user" marks a title you
+    set; any other title is the app's own and comes back marked "(auto-generated)". A
+    VSCode-extension session takes its title from the extension's state. Codex exports
+    CODEX_THREAD_ID, and the thread's name is the task title. A session titled nowhere
+    comes back as its id. Outside an agent session the answer is None.
+    """
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    tid = os.environ.get("CODEX_THREAD_ID", "").strip()
+    if sid and (caller_has_peer_channel() or not tid):
+        for p in glob.glob(f"{META_ROOT}/*/*/local_*.json"):
+            try:
+                m = json.load(open(p))
+            except Exception:
+                continue
+            if m.get("cliSessionId") == sid and m.get("title"):
+                if m.get("titleSource") == "user":
+                    return m["title"]
+                return f'{m["title"]} (auto-generated)'
+        try:
+            for s in list_vscode_sessions(cwd):
+                if s.get("cliSessionId") == sid and s.get("title"):
+                    return s["title"]
+        except Exception:
+            pass
+        return sid
+    if tid:
+        try:
+            with _sqlite_readonly(CODEX_STATE_DB) as db:
+                row = db.execute("SELECT name FROM threads WHERE id = ?", (tid,)).fetchone()
+        except (OSError, sqlite3.Error):
+            row = None
+        if row and row["name"]:
+            return row["name"]
+        return tid
+    return None
+
+
+def cmd_whoami(args):
+    name = own_session_name(args.cwd)
+    if not name:
+        sys.stderr.write("No CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID here: "
+                         "this process is not inside an agent session.\n")
+        return 1
+    print(name)
+    return 0
+
+
 def _delivery_failed(target, exc):
     status = ("Delivery outcome is unknown; inspect the receiver before retrying."
               if exc.uncertain else "Nothing was queued for later delivery.")
@@ -2343,6 +2394,9 @@ examples:
   # Who is here, how to reach them, and whether they are still moving
   jsonl2md.py situation
   jsonl2md.py situation --exclude "My Own Session" --json
+
+  # From inside an agent session: that session's own title
+  jsonl2md.py whoami
 
   # Hold the rules the automated callers depend on. Prints N/N, exits 1 on failure.
   jsonl2md.py selftest
@@ -2632,6 +2686,13 @@ def main():
     p_ls.add_argument("--cwd", default=DEFAULT_CWD,
                      help=f"project path to filter by (default: {DEFAULT_CWD})")
     p_ls.set_defaults(func=cmd_list_sessions)
+
+    p_who = sub.add_parser(
+        "whoami",
+        help="from inside an agent session: that session's own title")
+    p_who.add_argument("--cwd", default=DEFAULT_CWD,
+                       help=f"project a VSCode-extension session is found in (default: {DEFAULT_CWD})")
+    p_who.set_defaults(func=cmd_whoami)
 
     p_rp = sub.add_parser(
         "recent-prompts",

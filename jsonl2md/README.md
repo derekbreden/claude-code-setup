@@ -166,6 +166,20 @@ parentheses: invisible to `list-sessions` by design, but still workers, still re
 possibly the ones holding something nobody owns. They run through `--exclude` on the way in,
 the same as the titled half.
 
+### Who you are: `whoami`
+
+```sh
+python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py whoami
+```
+
+Run from inside an agent session, it prints that session's own title — the name a
+homesodamachine commit's `Session:` trailer carries. Claude Code exports
+`CLAUDE_CODE_SESSION_ID` to every command it runs, and the desktop app's record for that id
+holds the title; a title you didn't set comes back marked `(auto-generated)`. A
+VSCode-extension session is titled from the extension's state, a Codex task by its thread's
+name from `CODEX_THREAD_ID`, and a session titled nowhere by its id. Outside an agent
+session it exits 1.
+
 ### The rules under test: `selftest`
 
 ```sh
