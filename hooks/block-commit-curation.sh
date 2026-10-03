@@ -2,9 +2,9 @@
 # Block the git moves an agent makes when it's trying to keep another agent's
 # changes out of its commit. This is the one shared worktree: every simultaneous
 # agent's in-progress work shows up in `git status`, so a diff bigger than what
-# you touched is the normal state, not a problem. The fix is `git add -A && git
-# commit` — committing someone else's line costs nothing here. Carving the commit
-# down (unstaging, selectively staging) is wasted motion; discarding the tree to
+# you touched is the normal state, not a problem. A commit names its own paths —
+# `git commit -- <paths>` — and needs no carving: unstaging or selectively staging
+# edits the index every session commits from; discarding the tree to
 # "clean up" deletes another agent's uncommitted work, which no commit can bring
 # back.
 #
