@@ -99,17 +99,6 @@
           }
         ]
       }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/reap-abandoned-forks.sh",
-            "timeout": 15
-          }
-        ]
-      }
     ]
   }
 }
