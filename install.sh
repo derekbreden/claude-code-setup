@@ -30,25 +30,3 @@ mkdir -p "$HOME/.codex/skills"
 ln -sfn "$REPO/codex/skills/relay" "$HOME/.codex/skills/relay"
 echo
 echo "skill    -> ~/.codex/skills/relay"
-
-# 4) The cloud inbox watcher is a LaunchAgent: it tails every live cloud session
-#    and delivers their <relay to=…> marks into local sessions, so it has to be
-#    up whenever the Mac is, not only while some session remembers to run it.
-#    The plist is rendered from the tracked template (launchd resolves nothing
-#    itself: no $HOME, no PATH lookup) and (re)bootstrapped in the login domain.
-LABEL="com.derekbredensteiner.relay-cloud-inbox"
-PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-# The interpreter must import `cryptography` (the desktop token cache is
-# decrypted with it); the first python3 on PATH is not always the one that can.
-PYTHON=""
-for candidate in /opt/homebrew/bin/python3 "$(command -v python3)" /usr/local/bin/python3 /usr/bin/python3; do
-  if [ -x "$candidate" ] && "$candidate" -c "import cryptography" 2>/dev/null; then PYTHON="$candidate"; break; fi
-done
-[ -n "$PYTHON" ] || { echo "no python3 with the cryptography module found; pip install cryptography" >&2; exit 1; }
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.jsonl2md/cloud"
-sed -e "s|__PYTHON__|$PYTHON|g" -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" \
-  "$REPO/launchd/$LABEL.plist.in" > "$PLIST"
-launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo
-echo "agent    -> $PLIST  (log: ~/.jsonl2md/cloud/inbox.log)"

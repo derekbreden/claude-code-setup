@@ -1,4 +1,4 @@
-"""Transport and deferred-delivery regressions; all receivers are isolated sockets."""
+"""Transport regressions; all receivers are isolated sockets."""
 
 import contextlib
 import hashlib
@@ -9,7 +9,6 @@ from pathlib import Path
 import shlex
 import socket
 import struct
-import subprocess
 import tempfile
 import threading
 import time
@@ -273,129 +272,29 @@ class LiveRelayTests(unittest.TestCase):
 
 class DeliveryPolicyTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="relay-policy-", dir="/tmp")
-        self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
         self.args = SimpleNamespace(title="Target", text="message", sender="Sender", reply_to=None,
-            kind=None, force_relay=True, defer=False, expires_in=300, mode="interrupt", cwd="/tmp")
+            kind=None, force_relay=True, cwd="/tmp")
 
-    def send(self, kind="claude", **patches):
-        target = {"kind": kind, "id": "target", "label": "Target"}
-        defaults = {"RELAY_INBOX_ROOT": str(self.root), "resolve_any_target": lambda *a: target,
+    def send(self, **patches):
+        target = {"kind": "claude", "id": "target", "label": "Target"}
+        defaults = {"resolve_any_target": lambda *a: target,
                     "peer_addresses": lambda: {"target": {"name": "Target"}}, **patches}
         output = io.StringIO()
         with patch.multiple(relay, **defaults), contextlib.redirect_stderr(output), contextlib.redirect_stdout(output):
             rc = relay.cmd_send(self.args)
         return rc, output.getvalue()
 
-    def test_unavailable_claude_does_not_defer(self):
+    def test_unavailable_claude_is_a_certain_failure(self):
         rc, output = self.send(peer_addresses=lambda: {})
         self.assertEqual(rc, 1)
         self.assertIn("Nothing was queued", output)
-        self.assertEqual(list(self.root.iterdir()), [])
 
-    def test_uncertain_failure_does_not_defer(self):
+    def test_uncertain_failure_exits_2(self):
         def fail(*args, **kw):
             raise DeliveryError("disconnected", uncertain=True)
         rc, output = self.send(send_claude=fail)
         self.assertEqual(rc, 2)
         self.assertIn("unknown", output)
-        self.assertEqual(list(self.root.iterdir()), [])
-
-    def test_explicit_defer_has_expiry(self):
-        self.args.defer = True
-        rc, _ = self.send()
-        self.assertEqual(rc, 0)
-        message = json.loads(next(self.root.glob("target/*.json")).read_text())
-        self.assertEqual(message["expires_at"] - message["ts"], 300)
-
-    def test_no_unbounded_defer(self):
-        self.args.defer = True
-        for ttl in (0, -1, 86401, float("nan"), float("inf")):
-            self.args.expires_in = ttl
-            self.assertEqual(self.send()[0], 1)
-        self.assertEqual(list(self.root.iterdir()), [])
-
-    def test_codex_never_uses_deferred_transport(self):
-        self.args.defer = True
-        self.assertEqual(self.send(kind="codex")[0], 1)
-        self.assertEqual(list(self.root.iterdir()), [])
-
-    def hook(self):
-        script = Path(__file__).resolve().parent.parent / "hooks/deliver-relay-message.sh"
-        return subprocess.run(["bash", str(script)], input=json.dumps({"session_id": "target"}),
-            text=True, capture_output=True, check=True,
-            env={**os.environ, "HSM_RELAY_INBOX_ROOT": str(self.root)}).stdout
-
-    def queue(self, name, **values):
-        box = self.root / "target"
-        box.mkdir(exist_ok=True)
-        path = box / (name + ".json")
-        path.write_text(json.dumps({"text": "fresh message", "from": "Sender", "ts": time.time(), **values}))
-        return path
-
-    def test_deferred_interrupt_is_short_and_delivered_once(self):
-        path = self.queue("001", reply_to="Sender's task")
-        output = json.loads(self.hook())["hookSpecificOutput"]
-        self.assertEqual(output["permissionDecision"], "deny")
-        text = output["permissionDecisionReason"]
-        self.assertTrue(text.startswith("Agent message from Sender · sent "))
-        self.assertNotIn("--reply-to", text)
-        self.assertIn("Sender's task", shlex.split(text.splitlines()[-1]))
-        self.assertFalse(path.exists())
-        self.assertEqual(self.hook(), "")
-
-    def test_nudge_adds_context_without_denial(self):
-        self.queue("001", mode="nudge")
-        output = json.loads(self.hook())["hookSpecificOutput"]
-        self.assertNotIn("permissionDecision", output)
-        self.assertIn("fresh message", output["additionalContext"])
-
-    def test_expired_messages_are_archived_without_injection(self):
-        explicit = self.queue("001", text="stale explicit", expires_at=time.time() - 1)
-        legacy = self.queue("002", text="stale legacy", ts=time.time() - 3600)
-        self.queue("003", mode="nudge")
-        output = self.hook()
-        self.assertNotIn("stale", output)
-        self.assertIn("fresh message", output)
-        for path in (explicit, legacy):
-            self.assertFalse(path.exists())
-            self.assertTrue((path.parent / "expired" / path.name).is_file())
-
-    def test_expired_only_does_not_interrupt(self):
-        self.queue("001", expires_at=1)
-        self.assertEqual(self.hook(), "")
-
-    def test_malformed_message_is_preserved_without_interrupt(self):
-        path = self.queue("001")
-        path.write_text("not JSON")
-        self.assertEqual(self.hook(), "")
-        self.assertEqual((path.parent / "expired" / path.name).read_text(), "not JSON")
-
-    def test_invalid_expiry_cannot_bypass_expiration(self):
-        self.queue("001", expires_at="forever")
-        self.assertEqual(self.hook(), "")
-
-    def test_legacy_watcher_does_not_report_an_expired_reply(self):
-        self.queue("001", expires_at=1)
-        args = SimpleNamespace(title="Target", cwd="/tmp", timeout=0.001, interval=0.005)
-        output = io.StringIO()
-        with patch.object(relay, "RELAY_INBOX_ROOT", str(self.root)), \
-                patch.object(relay, "own_session_id", return_value=("target", "Target")), \
-                contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-            relay.cmd_await_reply(args)
-        self.assertIn("TIMEOUT", output.getvalue())
-        self.assertNotIn("RELAY REPLY", output.getvalue())
-
-    def test_concurrent_hooks_only_deliver_once(self):
-        self.queue("001")
-        results = []
-        workers = [threading.Thread(target=lambda: results.append(self.hook())) for _ in range(2)]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join()
-        self.assertEqual(sum(bool(r) for r in results), 1)
 
 
 class CloudRelayTests(unittest.TestCase):

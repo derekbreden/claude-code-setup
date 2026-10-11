@@ -58,7 +58,6 @@ import sqlite3
 import subprocess
 import sys
 import time
-import uuid
 from datetime import datetime, timezone
 from urllib.request import Request, urlopen
 
@@ -70,8 +69,6 @@ META_ROOT = os.path.expanduser("~/Library/Application Support/Claude/claude-code
 SESSIONS_ROOT = os.path.expanduser("~/.claude/sessions")
 VSCODE_WS_STORAGE = os.path.expanduser("~/Library/Application Support/Code/User/workspaceStorage")
 JSONL_ROOT = os.path.expanduser("~/.claude/projects")
-RELAY_INBOX_ROOT = os.path.expanduser("~/.claude/hooks/relay-inbox")
-DEFERRED_TTL = 300
 CLAUDE_APP_DIR = os.path.expanduser("~/Library/Application Support/Claude")
 COOKIE_DB = os.path.join(CLAUDE_APP_DIR, "Cookies")
 KEYCHAIN_SERVICE = "Claude Safe Storage"
@@ -855,8 +852,7 @@ def peer_addresses():
 
     A session is reachable when it has registered a `messagingSocketPath`, that
     socket is still on disk, and its process is still alive. A registry entry
-    without one needs to be opened in a current runtime for live delivery.
-    An explicit --defer send can use its legacy mailbox."""
+    without one needs to be opened in a current runtime for live delivery."""
     out = {}
     for p in glob.glob(f"{SESSIONS_ROOT}/*.json"):
         try:
@@ -1179,7 +1175,7 @@ def _cloud_cache(name):
     return os.path.join(CLOUD_CACHE_ROOT, name)
 
 
-def cloud_sessions(force=False, max_age=CLOUD_LIST_TTL):
+def cloud_sessions(force=False):
     """Every live (active or paused) cloud record on the account, cached for a
     minute. Archived ones are left on the server: the account carries a
     thousand of them and nothing here addresses one.
@@ -1192,7 +1188,7 @@ def cloud_sessions(force=False, max_age=CLOUD_LIST_TTL):
     if not force:
         try:
             age = time.time() - os.path.getmtime(cache)
-            if age < max_age:
+            if age < CLOUD_LIST_TTL:
                 return json.load(open(cache))
         except (OSError, ValueError):
             pass
@@ -1496,7 +1492,7 @@ def cmd_list_sessions(args):
         elif is_cloud(s.get("cliSessionId")):
             print(f'{s["title"]:<{width}}  → {cloud_reach(s)}')
         else:
-            print(f'{s["title"]:<{width}}  → no live receiver (--defer for legacy mailbox)')
+            print(f'{s["title"]:<{width}}  → no live receiver')
 
 
 # --- recent-prompts: what you said last, and where it is ----------------------
@@ -2054,69 +2050,6 @@ def cmd_watch(args):
         sys.stderr.write(f"\n[watch] {label}: stopped (cursor not committed).\n")
 
 
-def own_session_id(explicit, cwd):
-    """The CALLER'S own session — the mailbox `await-reply` watches.
-
-    Never guessed. `send` resolves someone else's session and a wrong answer is loud
-    (the message lands in a stranger's context); this resolves the caller's own, and a
-    wrong answer is SILENT — you wait forever on a mailbox nobody writes to while the
-    reply sits in yours. "The most recently written transcript" is exactly wrong here:
-    the agent you are waiting on is the one writing, so freshness picks THEM. So this
-    takes a title or an id and nothing else, and the caller's id is discoverable without
-    guessing: it is the session-named directory in the scratchpad path the harness gives
-    every agent, `/tmp/claude-<uid>/<project>/<SESSION-ID>/scratchpad`."""
-    if not explicit:
-        env_id = os.environ.get("CLAUDE_SESSION_ID", "").strip()
-        if env_id:
-            return env_id, env_id
-        sys.stderr.write(
-            "await-reply needs the session whose mailbox to watch — YOUR OWN, not the one\n"
-            "you messaged. Pass its title or cliSessionId. An agent's own id is the\n"
-            "session-named directory in its scratchpad path:\n"
-            "  /tmp/claude-<uid>/<project>/<SESSION-ID>/scratchpad\n"
-            "This is not inferred, because the freshest transcript in a project is the\n"
-            "session you are waiting ON, not the one waiting.\n")
-        sys.exit(2)
-    return resolve_target(explicit, cwd)
-
-
-def cmd_await_reply(args):
-    """Watch explicit legacy --defer replies. Live replies wake the runtime.
-
-    This compatibility watcher does not drain the mailbox or report expired
-    messages as replies. Use it in the background only for a legacy receiver.
-    """
-    cli_id, label = own_session_id(args.title, args.cwd)
-    box = os.path.join(RELAY_INBOX_ROOT, cli_id)
-    sys.stderr.write(f"[await-reply] watching {label} ({cli_id})\n[await-reply] mailbox: {box}\n")
-    deadline = (time.time() + args.timeout) if args.timeout else None
-    while True:
-        messages = []
-        for path in sorted(glob.glob(os.path.join(box, "*.json"))):
-            try:
-                with open(path) as stream:
-                    message = json.load(stream)
-                expiry = message.get("expires_at", (message.get("ts") or 0) + DEFERRED_TTL)
-                if expiry > time.time() and message.get("text"):
-                    messages.append(message)
-            except (OSError, ValueError, TypeError, AttributeError):
-                continue
-        if messages:
-            who = ", ".join(dict.fromkeys(m.get("from") or "unknown" for m in messages))
-            print(f"RELAY REPLY for {label} — {len(messages)} message(s) from {who}")
-            for message in messages:
-                text = " ".join(message["text"].split())
-                print("  " + text[:200] + ("…" if len(text) > 200 else ""))
-            print("(full text arrives via the delivery hook on your next tool call)")
-            sys.stdout.flush()
-            return
-        if deadline and time.time() > deadline:
-            print(f"RELAY TIMEOUT for {label} — no reply after {args.timeout:g}s")
-            sys.stdout.flush()
-            return
-        time.sleep(args.interval)
-
-
 def _label_for_id(cli_id, cwd):
     """Best-effort title for a cliSessionId, for the return address. Never fatal."""
     try:
@@ -2203,10 +2136,6 @@ def _delivery_failed(target, exc):
 
 def _send_codex(args, target):
     """Native tool redirect, or direct input through the running desktop app."""
-    if getattr(args, "defer", False):
-        sys.stderr.write("[relay] --defer is only for legacy Claude mailboxes. "
-                         "Codex delivery is live; nothing was sent.\n")
-        return 1
     if caller_is_codex() and not args.force_relay:
         native_args = json.dumps({"threadId": target["id"],
                                   "prompt": "From <your task title>: <your message>"})
@@ -2247,20 +2176,6 @@ def _caller_bridge_address():
     return None
 
 
-def cloud_way_back(sender):
-    """What a cloud session is told about answering: SendMessage will not carry
-    it, a mark in its own reply will. Appended to every message sent there."""
-    name = sender or "<the session name you were given>"
-    return ("\nYou are a cloud session and cannot message back through SendMessage. To answer, "
-            f"or to reach any session on Derek's Mac, write this in your reply and end your turn:\n"
-            f'<relay to="{name}">\nyour message\n</relay>\n'
-            "A watcher on that Mac delivers it within seconds; the answer arrives here as a "
-            "cross-session message. To read a session's transcript instead, write "
-            '<relay read="its title" tail="40"/> the same way; it arrives in parts. Mid-task, '
-            'without ending your turn, run the mark as a tool call instead: '
-            'tools/relay-mark to "name" "message" (or read "title" 40) in the homesodamachine checkout.\n')
-
-
 def _cloud_record(cse_id):
     """The roster record for a cloud id, or nothing when the roster does not carry it."""
     try:
@@ -2276,10 +2191,6 @@ def _send_cloud(args, target):
     """A session in the cloud or on another machine: one event posted to its
     cloud record, or the native tool when the caller has one."""
     cse_id, label = target["id"], target["label"]
-    if getattr(args, "defer", False):
-        sys.stderr.write("[relay] --defer is a mailbox on this disk; a cloud session never reads "
-                         "it. Nothing was sent.\n")
-        return 1
     if caller_has_peer_channel() and not args.force_relay:
         sys.stderr.write(
             f"[relay] {label!r} is reachable through your native peer channel:\n"
@@ -2291,7 +2202,11 @@ def _send_cloud(args, target):
         token = _cloud_token()
     except TranscriptError as exc:
         return _delivery_failed(target, DeliveryError(f"no cloud grant: {exc}"))
-    text = codex_envelope(args.text, args.sender, None, None) + cloud_way_back(args.sender)
+    reply_label = _label_for_id(args.reply_to, args.cwd) if args.reply_to else None
+    text = codex_envelope(args.text, args.sender, None, None)
+    if args.reply_to:
+        text += (f"\nReply to {reply_label or args.reply_to}: you are not on the sender's machine, "
+                 "so answer in your own transcript; the sender reads it from there.\n")
     mode = getattr(args, "from_mode", None) or receiver_mode(_cloud_record(cse_id))
     try:
         receipt = send_cloud(cse_id, text, args.sender, token=token, org_uuid=_org_uuid(),
@@ -2308,30 +2223,6 @@ def _send_cloud(args, target):
     return 0
 
 
-def _defer_claude(args, target):
-    """Explicit compatibility path with a finite lifetime; never a send fallback."""
-    ttl = getattr(args, "expires_in", DEFERRED_TTL)
-    if not 0 < ttl <= 86400:
-        sys.stderr.write("[relay] --expires-in must be between 0 and 86400 seconds. Nothing was sent.\n")
-        return 1
-    box = os.path.join(RELAY_INBOX_ROOT, target["id"])
-    os.makedirs(box, exist_ok=True)
-    now = time.time()
-    msg = {"mode": args.mode, "text": args.text, "from": args.sender,
-           "ts": now, "expires_at": now + ttl}
-    if args.reply_to:
-        msg["reply_to"] = args.reply_to
-    dst = os.path.join(box, f"{int(now * 1000):013d}-{uuid.uuid4()}.json")
-    tmp = dst + ".tmp"
-    with open(tmp, "x") as f:
-        json.dump(msg, f)
-    os.replace(tmp, dst)
-    sys.stderr.write(f"[relay] deferred for {target['label']!r}; expires in {ttl:g}s. "
-                     "Delivery requires its next tool call; this does not wake an idle agent.\n")
-    print(dst)
-    return 0
-
-
 def cmd_send(args):
     if not args.text.strip():
         sys.stderr.write("[relay] Message is empty. Nothing was sent.\n")
@@ -2342,8 +2233,6 @@ def cmd_send(args):
     cli_id, label = target["id"], target["label"]
     if is_cloud(cli_id):
         return _send_cloud(args, target)
-    if getattr(args, "defer", False):
-        return _defer_claude(args, target)
     peer = peer_addresses().get(cli_id)
     if peer and not args.force_relay and caller_has_peer_channel():
         sys.stderr.write(
@@ -2354,8 +2243,7 @@ def cmd_send(args):
         return 1
     if not peer:
         return _delivery_failed(target, DeliveryError(
-            "no live Claude peer receiver. Open the session in a current Claude app, "
-            "or explicitly use --defer --expires-in 300 for its legacy mailbox"))
+            "no live Claude peer receiver. Open the session in a current Claude app"))
     text = codex_envelope(args.text, args.sender, args.reply_to, args.reply_to)
     try:
         receipt = send_claude(peer, text, args.sender, SESSIONS_ROOT, mode=getattr(args, "from_mode", None) or "bypass")
@@ -2427,19 +2315,10 @@ examples:
   # A return address lets the receiver answer through the same live routes.
   jsonl2md.py send "Build time" "Can you check the fit?" --from "Funnel mold" --reply-to "Funnel mold"
 
-  # Explicit legacy Claude delivery: no wake-up, expires after five minutes.
-  jsonl2md.py send "Build time" "..." --defer --expires-in 300
-
   # A session in the cloud, or on another machine: the same verb. A Claude caller
   # is handed the native address; anyone else posts to its cloud record.
   jsonl2md.py send "Ceiling panel" "The 3 mm floor is the limit; see grip-roof-shared-datum" --from "Tower"
   jsonl2md.py delta "Ceiling panel" --tail 2      # its answer is in its own transcript
-
-  # The way back: a cloud session writes <relay to="Time">…</relay> in its reply and
-  # this watcher (kept alive by launchd, see install.sh) delivers it into Time.
-  jsonl2md.py cloud-inbox
-  jsonl2md.py cloud-inbox --session cse_… --once   # one pass over one record
-  jsonl2md.py await-reply "My Session Title" --timeout 300  # legacy only, in background
 
   # Standalone: any Claude Code .jsonl on disk
   jsonl2md.py render path/to/session.jsonl > out.md
@@ -2448,25 +2327,6 @@ examples:
 
 
 # --- selftest ----------------------------------------------------------------
-
-def cmd_cloud_inbox(args):
-    """Tail live cloud sessions and deliver their `<relay to=…>` marks locally."""
-    from cloud_inbox import Inbox, InboxState
-    inbox = Inbox(interval=args.interval, only=args.session or None, cwd=args.cwd,
-                  state=InboxState(args.state) if args.state else None)
-    if args.once:
-        n = inbox.pass_once()
-        sys.stderr.write(f"[inbox] one pass: {n} delivered\n")
-        return 0
-    try:
-        if args.poll:
-            inbox.run()
-        else:
-            inbox.run_streams()
-    except KeyboardInterrupt:
-        sys.stderr.write("\n[inbox] stopped.\n")
-    return 0
-
 
 def cmd_selftest(args):
     """Check speech, session exclusion, and message routing without live delivery."""
@@ -2497,9 +2357,9 @@ def cmd_selftest(args):
     # The regression: an unexpanded slash command is flagged isMeta and carries
     # no envelope, so the flag alone cannot tell it from an expanded body.
     check("unexpanded slash command is speech",
-          user_speech({"isMeta": True}, "/hourly-help"), "/hourly-help")
+          user_speech({"isMeta": True}, "/relay"), "/relay")
     check("unexpanded slash command with args is speech",
-          user_speech({"isMeta": True}, "/loop 1h /hourly-help"), "/loop 1h /hourly-help")
+          user_speech({"isMeta": True}, "/loop 1h /relay"), "/loop 1h /relay")
     check("expanded command body is not speech",
           user_speech({"isMeta": True}, "# /loop\n\nParse the input below"), "")
     check("meta prose is not speech",
@@ -2550,7 +2410,7 @@ def cmd_selftest(args):
               untitled_sessions("/tmp", ["helper-35"]), [])
 
         globals()["session_prompts"] = lambda s: (
-            [{"when": "2026-01-01T00:00:00.000Z", "text": "/hourly-help",
+            [{"when": "2026-01-01T00:00:00.000Z", "text": "/relay",
               "session": s.get("title"), "path": "x", "line": 1, "uuid": "u"}]
             if s.get("cliSessionId") == "deadbeef-0000" else [])
         buf, real = io.StringIO(), sys.stdout
@@ -2563,16 +2423,14 @@ def cmd_selftest(args):
             sys.stdout = real
         check("the gate reads an untitled session's prompts", rc, 0)
         check("and reports what was typed there",
-              "/hourly-help" in buf.getvalue(), True)
+              "/relay" in buf.getvalue(), True)
     finally:
         (globals()["list_sessions"], globals()["peer_addresses"],
          globals()["_peer_idle_module"], globals()["session_prompts"],
          globals()["is_cloud"]) = saved
 
-    # Redirects send nothing. Cross-runtime sends use live receivers, and a
-    # delivery error must never create a delayed mailbox message.
+    # Redirects send nothing. Cross-runtime sends use live receivers.
     from contextlib import redirect_stderr, redirect_stdout
-    from tempfile import TemporaryDirectory
     from unittest.mock import patch
     routing_cases = [
         ("Codex to Codex redirects", {"CODEX_THREAD_ID": "caller"}, "codex", False, 1, 0, 0),
@@ -2588,13 +2446,11 @@ def cmd_selftest(args):
     for name, runtime_env, kind, force, want_rc, want_codex, want_claude in routing_cases:
         target = {"kind": kind, "id": "target-id", "label": "Target"}
         ns = types.SimpleNamespace(title="Target", cwd="/tmp", kind=None,
-                                   force_relay=force, mode="interrupt", text="routing check",
-                                   sender="Caller", reply_to=None, defer=False)
+                                   force_relay=force, text="routing check",
+                                   sender="Caller", reply_to=None)
         output = io.StringIO()
-        with TemporaryDirectory() as inbox, \
-                patch.dict(os.environ, runtime_env, clear=True), \
+        with patch.dict(os.environ, runtime_env, clear=True), \
                 patch.dict(globals(), {
-                    "RELAY_INBOX_ROOT": inbox,
                     "resolve_any_target": lambda *a: target,
                     "peer_addresses": lambda: {"target-id": {"name": "Target"}},
                 }), \
@@ -2605,7 +2461,6 @@ def cmd_selftest(args):
             check(name + ": result", rc, want_rc)
             check(name + ": Codex count", codex.call_count, want_codex)
             check(name + ": Claude count", claude.call_count, want_claude)
-            check(name + ": no mailbox", glob.glob(os.path.join(inbox, "*", "*.json")), [])
             if want_codex:
                 check(name + ": destination", codex.call_args.args[0], "target-id")
             if kind == "codex" and want_rc == 1:
@@ -2645,7 +2500,7 @@ def main():
     )
     sub = ap.add_subparsers(
         dest="cmd",
-        metavar="{list-codex-sessions,export-codex-session,list-sessions,situation,board,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,await-reply,selftest}",
+        metavar="{list-codex-sessions,export-codex-session,list-sessions,situation,board,recent-prompts,export-session,list-chats,export-chat,render,delta,watch,send,selftest}",
     )
 
     p_cls = sub.add_parser(
@@ -2829,9 +2684,6 @@ def main():
     )
     p_send.add_argument("title", help="exact session title (see list-sessions) or a cliSessionId")
     p_send.add_argument("text", help="the message to deliver into that session")
-    p_send.add_argument("--mode", choices=["interrupt", "nudge"], default="interrupt",
-                        help="with --defer only: interrupt blocks the next tool call; "
-                             "nudge adds context without blocking")
     p_send.add_argument("--from", dest="sender", default=None,
                         help="optional label for who is sending (shown to the receiving agent)")
     p_send.add_argument("--reply-to", dest="reply_to", default=None,
@@ -2844,47 +2696,8 @@ def main():
     p_send.add_argument("--from-mode", dest="from_mode", choices=["bypass", "prompting"], default=None,
                         help="the permission class to assert, which must be the RECEIVER's for it to deliver unasked: derived from its cloud record when omitted (bypass for a session on this Mac)"
                              "delivers unasked only from its own class (default: bypass)")
-    p_send.add_argument("--defer", action="store_true",
-                        help="explicitly use a legacy Claude mailbox instead of live delivery")
-    p_send.add_argument("--expires-in", type=float, default=DEFERRED_TTL, metavar="SECONDS",
-                        help="--defer lifetime, 0 < seconds <= 86400 (default: 300)")
     p_send.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
     p_send.set_defaults(func=cmd_send)
-
-    p_inbox = sub.add_parser(
-        "cloud-inbox",
-        help="deliver <relay to=…> marks from live cloud sessions into local sessions (daemon)",
-        epilog=EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_inbox.add_argument("--poll", action="store_true",
-                         help="poll each session's events instead of holding its live stream")
-    p_inbox.add_argument("--interval", type=float, default=4.0, help="--poll seconds (default: 4)")
-    p_inbox.add_argument("--session", action="append", metavar="CSE_ID",
-                         help="watch exactly this cloud record (repeatable; default: every live "
-                              "session on Anthropic's machines)")
-    p_inbox.add_argument("--once", action="store_true", help="one pass, then exit")
-    p_inbox.add_argument("--state", default=None, metavar="PATH",
-                         help="cursor file (default: ~/.jsonl2md/cloud/inbox.json, the daemon's; a manual "
-                              "run against --session should use its own)")
-    p_inbox.add_argument("--cwd", default=DEFAULT_CWD, help=f"project for Codex targets (default: {DEFAULT_CWD})")
-    p_inbox.set_defaults(func=cmd_cloud_inbox)
-
-    p_await = sub.add_parser(
-        "await-reply",
-        help="watch a legacy --defer mailbox (live delivery does not need this)",
-        epilog=EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_await.add_argument("title", nargs="?", default=None,
-                         help="YOUR OWN session title or cliSessionId — the mailbox to watch, "
-                              "not the session you messaged")
-    p_await.add_argument("--timeout", type=float, default=3600.0,
-                         help="give up after N seconds and exit anyway (0 = wait forever; "
-                              "default 3600)")
-    p_await.add_argument("--interval", type=float, default=3.0, help="poll seconds (default: 3.0)")
-    p_await.add_argument("--cwd", default=DEFAULT_CWD, help=f"project path (default: {DEFAULT_CWD})")
-    p_await.set_defaults(func=cmd_await_reply)
 
     p_self = sub.add_parser(
         "selftest",

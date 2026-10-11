@@ -76,10 +76,8 @@ Choose the first available route that reaches the resolved target:
   wakes an idle session. The target must be open in its running desktop runtime.
 - **A Claude session in the cloud, or on another machine:** the same script verb. The board
   lists it with what it is; the script posts the message to its cloud record, the way the
-  CLI's own peer messaging does. A cloud session answers with a `<relay to="<your title>">`
-  mark in its reply, which the cloud-inbox watcher on this Mac delivers into your task; the
-  message you send already tells it so. It reads a local transcript with
-  `<relay read="<title>" tail="40"/>`, answered the same way.
+  CLI's own peer messaging does. It cannot answer you through the relay: read its reply in
+  its own transcript with `delta`.
 
 ```sh
 python3 $J send "<exact title>" "<message>" --from "<your own task name>"
@@ -112,17 +110,9 @@ task id; an exact, unambiguous title also works:
 python3 $J send "<target>" "<message>" --from "C14 2" --reply-to "C14 2"
 ```
 
-Live replies enter the active turn or wake the idle receiver. No `await-reply` watcher is
-needed. Continue independent work while waiting. Answer a question or send a correction when
-it changes what the sender should do. A reply does not itself need `--reply-to`.
-
-### Legacy Claude sessions
-
-When a Claude session has no live receiver, open it in a current runtime. If delivery on its
-next tool call is specifically wanted, use `--defer --expires-in 300`. This explicit mailbox
-path does not wake an idle session; `--mode interrupt|nudge` applies only here. Expired messages
-are retained under the mailbox's `expired/` directory and omitted from delivery. The default
-lifetime is five minutes, including old mailbox entries without an explicit expiry.
+Live replies enter the active turn or wake the idle receiver. Continue independent work while
+waiting. Answer a question or send a correction when it changes what the sender should do. A
+reply does not itself need `--reply-to`.
 
 ## When to send on your own initiative
 

@@ -64,25 +64,10 @@ session that is not on this machine — running in the cloud, or bridged from an
 through Remote Control — takes one cross-session event posted to its cloud record, the request
 the CLI's own `SendMessage` makes; a Claude caller is handed that tool's address
 (`bridge:session_…`) instead. Messages carry a sender label and UTC send time. Add a return
-address when an answer is needed. `--from-mode` asserts the sender's permission class (default
-`bypass`): a receiver delivers a peer message unasked only when the classes match, and holds
-it for its user otherwise.
-
-A cloud session cannot post back — the server accepts its credential for its own work only —
-so its way back is a mark in its own reply, `<relay to="Time">…</relay>`, and the `cloud-inbox`
-verb: a watcher that holds every live cloud session's event stream open (the CLI's own SSE
-endpoint; `--poll` falls back to a 4 s poll) and delivers each mark into the named local session
-(or Codex task) over the same transport a local `send` uses. A name that matches nothing
-is answered in place with the names that do. A second mark, `<relay read="Time" tail="40"/>`,
-reads instead: the watcher renders that session's clean transcript here and posts it into the
-cloud session in parts, which is what `/relay` does for a session with no disk to pull from.
-Mid-task, the mark can be a tool call instead — `tools/relay-mark to "Time" "…"` in the
-homesodamachine checkout — since a tool call is in the event stream the moment it runs and text
-between tool calls is not always recorded. Marks carry their event's time; one found more than
-ten minutes late is bounced, not delivered. `install.sh` keeps the watcher running as a
-LaunchAgent (`~/.jsonl2md/cloud/inbox.log`); every message sent to a cloud session tells it the
-marks, and the homesodamachine repo carries a project `/relay`, the `relay-poke` skill, and
-`tools/relay-mark` for a cloud session that speaks first.
+address when an answer is needed; a cloud session cannot answer through the relay, so its
+reply is read from its own transcript with `delta`. `--from-mode` asserts the sender's
+permission class (default `bypass`): a receiver delivers a peer message unasked only when the
+classes match, and holds it for its user otherwise.
 
 The target must be open in its running runtime. Unavailable receivers return a delivery error; an
 uncertain submission exits 2 and must be checked before retrying. Accepted input is not a read
@@ -90,10 +75,6 @@ receipt. The adapter uses local desktop interfaces and fails if their protocol i
 it never starts a second core or silently leaves a message for a later turn.
 
 `--force-relay` selects the live script path when a suggested native tool is unavailable.
-`--defer` explicitly selects a legacy Claude mailbox. Its default expiry is 300 seconds;
-`--expires-in` accepts a positive duration up to 86400 seconds. The hook retains expired
-messages in `expired/` without injecting them, including legacy entries older than five minutes.
-`--mode interrupt|nudge` and the `await-reply` watcher apply only to that deferred path.
 
 ### Your side of it: `recent-prompts`
 
@@ -188,16 +169,14 @@ session it exits 1.
 
 The checks cover user speech, exclusion of the caller's own session, and message routing.
 Routing cases use mocked live transports: native redirects send nothing and cross-runtime
-messages reach the requested destination once. The socket and hook suite runs with isolated
-receivers and temporary mailboxes:
+messages reach the requested destination once. The socket suite runs with isolated receivers:
 
 ```sh
 python3 -m unittest discover -s jsonl2md -p 'test_*.py'   # from the repository root
 ```
 
 It covers active steering, idle wake-up, partial frames, disconnected receivers, uncertain
-outcomes without retries, peer authentication, expiry, and concurrent mailbox drains.
-Neither suite messages a real agent.
+outcomes without retries, and peer authentication. Neither suite messages a real agent.
 
 ### Reading everything at once: `--compact`
 

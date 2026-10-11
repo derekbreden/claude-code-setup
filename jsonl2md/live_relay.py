@@ -4,9 +4,9 @@ Codex desktop IPC uses length-prefixed JSON requests. Claude's registered peer
 socket accepts authenticated newline-delimited JSON. A Claude session that is
 not on this machine -- one running on Anthropic's machines, or bridged from
 another computer through Remote Control -- takes a cross-session event posted
-to its cloud record, the same request the CLI's own SendMessage makes. No path
-writes a deferred message to disk. A timeout after submission is uncertain,
-never a reason to resend through another transport.
+to its cloud record, the same request the CLI's own SendMessage makes. A
+timeout after submission is uncertain, never a reason to resend through another
+transport.
 """
 
 import hashlib

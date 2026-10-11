@@ -44,30 +44,16 @@ transport from the runtime it lands in:
 | --- | --- | --- |
 | Claude session on this machine | its native peer socket (`~/.claude/sessions/<pid>.json`) | now: it wakes an idle session |
 | Claude session in the cloud, or on another machine | one cross-session event posted to its cloud record, the request the CLI's own `SendMessage` makes | now, through Anthropic's servers |
-| a cloud session → any session here | a `<relay to="name">…</relay>` mark in the reply that ends its turn; `cloud-inbox`, a launchd agent, holds each live cloud session's event stream open and delivers the mark over the peer socket | as the event lands, under a second |
-| a cloud session reading a session here | a `<relay read="title" tail="40"/>` mark; the watcher renders the clean transcript on this Mac and posts it into the cloud session in parts — `/relay` for a session with no disk to pull from | a few seconds |
-| either mark, mid-turn | `tools/relay-mark to "name" "…"` run as a tool call: the call is in the event stream the moment it runs, so the mark need not wait for the turn to end | a few seconds |
-
-A mark carries its event's own time. One found more than ten minutes after it was written (the
-watcher was down) is bounced back into the cloud session instead of delivered late: the stale
-tail the mailbox relay used to produce is what this is not. A cloud session younger than the
-roster cache is read from its first event, so nothing said before the watcher noticed it is lost.
-
-The watcher reads each session the way the CLI's own Remote Control client does: one
-server-sent-events connection per live session, resumed from the last sequence number, redialled
-with backoff when it drops, dead after 45 s of silence, and closed for good when the server
-answers 401, 403 or 404. `--poll` is the fallback: the same handling over a 4 s poll.
 | Codex task | the desktop app's IPC: steer the active turn, or start one | now |
 
 A handful of titles exist in *both* rosters — "Manager", "Build", "Relay". `send` refuses
 those rather than picking the runtime it happened to check first; `--kind claude|codex`
 settles it.
 
-Because a Codex task has no hook surface, the message it receives carries its own framing:
-who sent it, that it is an out-of-band interjection, and the literal shell command that
-reaches the sender back. That command is this same script, which is what closes the loop —
-Codex answers a Claude session by writing into the Claude mailbox, and the Claude session's
-`await-reply` is released by it.
+A message to a session or task on this machine carries its own framing: who sent it, when,
+and, given `--reply-to`, the literal shell command that reaches the sender back. That command
+is this same script, which is what closes the loop: the answer comes back over the same live
+routes.
 
 ## Pull, not push
 
@@ -122,18 +108,15 @@ to open or close; running the command *is* the act of routing.
   shows. (For others, pass a `cliSessionId`, or render by transcript path.)
 - It's a **snapshot at pull time**; re-run `/relay` (or `delta`) to refresh.
 - **One direction per pull** — you route by choosing where you run it.
-- **`codex queue` needs the Codex app-server daemon up.** A Claude mailbox is a file and
-  keeps until the target next acts; a Codex message goes through the running daemon, and
-  `send` fails loud rather than silently dropping it when that is not there.
+- **`send` needs the receiver running.** A Claude session takes a message through its live
+  peer socket and a Codex task through the running desktop app, and `send` fails loud rather
+  than silently dropping it when that is not there.
 - A **cloud session cannot post back**: the server accepts its credential for its own work
   only. `send` reaches it (a Claude caller is handed the native address,
   `SendMessage to: bridge:session_…`; anyone else posts the same event to its cloud record),
-  and the way back is the mark: a `<relay to="name">` block in its reply, which the
-  `cloud-inbox` watcher delivers into the named local session within seconds. Every message
-  sent to a cloud session says so, and the homesodamachine repo carries the `relay-poke`
-  skill for a cloud session that starts the conversation. A session on another computer needs
-  none of this: it has SendMessage of its own. A session that has switched cross-session
-  messages off is listed as refusing them, and the post fails loud.
+  and its answer is in its own transcript: `delta` or `watch` it. A session on another
+  computer has SendMessage of its own. A session that has switched cross-session messages off
+  is listed as refusing them, and the post fails loud.
 - Cloud sessions are matched to a project by **git remote**, since a cloud worker has no
   working directory — two checkouts of one repo see the same cloud sessions. A session
   bridged from another computer is listed the same way, when it is connected.

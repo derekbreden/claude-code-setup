@@ -13,9 +13,8 @@ Send a message into another of the user's agents. Request: **$ARGUMENTS**
    `mcp__codex_app__send_message_to_thread`. The script redirects same-runtime callers to
    these tools without sending anything. A Claude session in the cloud, or on another
    machine, is a Claude peer too: the board prints its address (`bridge:session_…`) and
-   `SendMessage` takes it verbatim. Such a session answers with a `<relay to="…">` mark in its
-   own reply, which the cloud-inbox watcher delivers to you as a peer message; the message you
-   send already tells it so.
+   `SendMessage` takes it verbatim. Such a session cannot reply here; read its answer with
+   `/relay` or `jsonl2md.py delta "<title>"`.
 3. For cross-runtime delivery, run:
 
    ```sh
@@ -33,19 +32,9 @@ Send a message into another of the user's agents. Request: **$ARGUMENTS**
 ## Replies
 
 Add `--reply-to "<your own id or exact title>"` when you need an answer. A stable id is preferable
-when titles may change. The reply follows the same live routes; no watcher needs to be armed.
+when titles may change. The reply follows the same live routes.
 Continue independent work while waiting. Answer questions and send facts that change what the
 other agent should do. A reply does not itself need to request another reply.
-
-## Legacy Claude receivers
-
-A session without a peer socket needs to be opened in a current Claude runtime for live
-messages. To intentionally leave a message for its next tool call, use `--defer --expires-in 300`.
-The default lifetime is five minutes. The delivery hook archives expired messages under
-`~/.claude/hooks/relay-inbox/<sessionId>/expired/` and omits them from the agent's input.
-`--mode interrupt` blocks that next tool call; `--mode nudge` attaches context without blocking.
-These modes apply only to deferred messages. `await-reply` is a compatibility watcher for
-explicitly deferred replies, to be run in the background only on a legacy receiver.
 
 ## Coordination
 
