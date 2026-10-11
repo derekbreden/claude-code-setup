@@ -1,124 +1,18 @@
 # hooks
 
-Claude Code hooks, referenced by absolute path from `~/.claude/settings.json`; `examples/settings.json` is that file's `hooks` block, verbatim. A Stop hook judges the assistant's final message and blocks effort estimates. Two PostToolUse hooks read what a write left on disk and hand back a note rather than a denial: residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). Four PreToolUse hooks gate tool calls: one on writes is a one-bounce speed bump at the elevation every future session reads as Derek (CLAUDE.md, AGENTS.md, the calibration); two on `Bash` deny branch creation and a sleep loop on a harness task's own output file; one on `WebFetch` and `WebSearch` denies the first call of each per session with a redirect to Chrome MCP. One hook injects context: when a prompt carries step-viewer pick text, it points the agent at the format's home and at the fact the channel is two-way.
+Wired by absolute path in `~/.claude/settings.json`; `examples/settings.json` is that file's
+`hooks` block. Each script's header says how it works.
 
-This is a personal tool, put on GitHub in case it helps someone running similar configurations. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
+| Hook | Runs on | Does |
+| --- | --- | --- |
+| `block-effort-estimate.sh` | Stop | Blocks an effort estimate in the final message (regex, then Haiku). |
+| `block-residue.sh` | after a write | Notes justification, defense or decision narrative in what was written (regex, Haiku, then Opus). |
+| `block-underived-measurement.sh` | after a write | Notes a hand-written dimension that should be a docgen marker (regex, then Haiku). |
+| `warn-elevation-write.sh` | before a write | Bounces the first write per session to a CLAUDE.md, AGENTS.md or `calibration/`. |
+| `block-branch.sh` | before Bash | Denies starting or publishing a git branch in the shared checkout. |
+| `block-task-sleep-poll.sh` | before Bash | Denies sleeping on a background task's own output file. |
+| `block-web.sh` | before WebFetch, WebSearch | Denies each tool's first call per session, redirecting to Chrome. |
+| `note-pick-text.sh` | a prompt | Points a prompt carrying `/3d` pick text at the format and the Find box. |
 
-## Who this is for
-
-You'll get value from this if **all** of the following are true:
-
-- You're using **Claude Code** and want it to block specific patterns in the assistant's turns and tool calls.
-- For the two-stage hooks: you're OK with **Anthropic API charges** — one small Haiku call per event when the regex pre-filter matches (a tiny fraction of events), and for the residue hook an Opus call on the whole file when Haiku says yes.
-- You're comfortable with **bash + jq + curl + perl** in your hook scripts and editing `~/.claude/settings.json` by hand.
-
-You will *not* get value from this if:
-
-- You want a **UI** for configuring patterns.
-- You want **portable, OS-agnostic** hooks (these use `tail -r`/`tac` and other shell quirks).
-- You want **fine-grained control over which sessions** a hook applies to (these run on every relevant event globally).
-- You aren't working in `~/Developer/homesodamachine`. Several hooks carry paths into that tree — the calibration the residue hook reads, the viewer the pick-text note points at, the publish chain the floor guard checks — and outside it they bail silently or need their paths changed.
-
-## The hooks
-
-### Stop
-
-The message it judges comes from **`_last_assistant_text.py`**, and getting it is not the one-liner it looks like. A turn's closing transcript lines are routinely `thinking` and `tool_use` records — assistant lines holding no text — so the last assistant *line* yields an empty message. And the hook fires while the record it was fired for is still being written, so the newest text on disk belongs to the previous turn. The reader takes the last assistant record that actually carries text, and waits (bounded at 2 s, ending the moment fresh text lands) for one younger than 5 s. A read that never goes fresh is judged anyway and logged `stale_read`, since a turn whose last text predates a long tool run is a legitimate shape.
-
-- **`block-effort-estimate.sh`** — Stop. Catches phrasings like "this'll take a day", "maybe a few hours", "weeks not months", "a couple of weeks". An effort estimate from an LLM is not tied to reality: it is pattern-matched from training data, where humans wrote estimates of work they were doing — work the LLM will do entirely differently. Two-stage: a regex pre-filter, then Haiku on a ±800-char window around the match. The block message asks the assistant to rewrite without one.
-
-
-### PostToolUse
-
-These run after a write has landed, so what they return arrives as context: the edit is on disk and the agent revises it.
-
-- **`block-residue.sh`** — `Write` / `Edit` / `MultiEdit` / `NotebookEdit`. Flags residue (justification, defense, decision narrative — the author going beyond describing what is) in the new content. Three stages, each narrowing at a lower cost than the next: a lenient regex pre-filter on the new content; Haiku on a ±600-char window around the first match, yes/no; then Opus 5 on the whole file, reading the calibration sources themselves (`Principle.md`, `principle/You.md` and `principle/Framing.md` in `~/Developer/homesodamachine/calibration/`), which returns the spans that earned the flag and its own reading of them, and can overturn stage 2 — an overturned flag emits nothing and does not spend the session's one warning. Stage 3 is what the agent receives; a bare stage-2 verdict reaches an agent only when stage 3 fails. **Fires once per session, not twice** — a marker at `~/.claude/hooks/state/residue-warned-<session-id>` records the warning, and markers older than 7 days are garbage-collected on each invocation. Skips binary/structured files (`.dxf`, `.json`, `.yaml`, etc.), the calibration files themselves, and project memory under `~/.claude/projects/*/memory/`, which carries rationale by design. Bails silently when the calibration files aren't at the expected path.
-
-- **`block-underived-measurement.sh`** — `Write` / `Edit` / `MultiEdit` / `NotebookEdit`. Flags a bare dimensional literal (a value in mm, degrees, or a `⌀`/`ø` diameter) where the dimension is one this project fabricates and so should be a docgen marker fed from a source constant. Two-stage: a lenient regex pre-filter for measurement-shaped literals, then Haiku on a ±600-char window that splits a *derivable* project dimension (a wall, bore, boss, fillet, angle of the project's own geometry → note) from an *external* value that is correctly a literal (a fastener size, imperial equivalent, vendor spec, raw caliper measurement → pass). Scopes by extension — Markdown is judged whole, `.py`/`.scad` are reduced to their **comment text** so code constants like `boss_annulus = 3.0` don't fire — and strips existing `[value](TAG)` markers first so already-pinned values don't fire. The note points the assistant at the repo's `tools/docgen` and the `[value](TAG)` marker syntax. **Fires once per session, not twice**, via `~/.claude/hooks/state/measurement-warned-<session-id>` (same 7-day GC). Applies only inside a repo that carries `tools/docgen` (found by walking up from the target file); bails silently anywhere else. After a Haiku call the log line also carries the window it saw and Haiku's raw reply, so a misclassification is diagnosable from the log alone.
-
-### PreToolUse
-
-These run before specific tool calls. A deny is the only PreToolUse outcome whose message reaches the model, so the once-per-session hooks deny the first call and step aside after.
-
-- **`warn-elevation-write.sh`** — `Write` / `Edit` / `MultiEdit` / `NotebookEdit`. A speed bump on writes to the elevation every future session reads as Derek: any CLAUDE.md or AGENTS.md, and homesodamachine's `calibration/`. The first attempt on a given file is denied with an advisory — a rule wanting to be written there is usually a TODO for a gap in the repo — and repeating the same call goes through. Allowed, not forbidden: the one bounce is the warning. `Bash` is not covered.
-
-- **`block-branch.sh`** — `Bash`. Catches commands that create or publish a git branch: `git checkout -b`/`-B`, `git switch -c`/`-C`, `git branch <newname>`, `git worktree add`, `gh pr create`, and `git push -u`/`--set-upstream` to a non-`main` branch. Work happens directly on `main` in the one shared worktree, where simultaneous agents surface conflicts in real time; a branch gives no isolation there and just hides work from the other agents on the same checkout. Listing/deleting/renaming branches (`git branch`, `-d`/`-D`, `-m`), returning to `main`, and pushing `main` pass. Scope is the ambient cwd's repo only: a command that explicitly operates on another checkout — a leading `cd`/`pushd`, or `git -C`/`--git-dir` — is fork/PR work where branches are the point, and passes untouched. The git/gh token is matched only at a command boundary, so a branch word inside a commit message, echo, or grep never trips. **Fires at most once per session**: the first offending command is denied with the convention, and the guard steps aside for the rest of the session rather than walling a deliberate branch.
-
-- **`block-task-sleep-poll.sh`** — `Bash`. Denies a command that both sleeps and names a harness task file (`.../tasks/<id>.output`) — the shape of `until [ -s … ]; do sleep 10; done` and `sleep 180; cat …/tasks/….output`. The harness re-invokes the session when a background task exits; a wait spent on a clock is time bought for nothing, and it is bounded by the Bash timeout rather than by the job. Sleeping on something the harness does not track — a CI run, a deploy, a dev server's port, another agent's lock — passes untouched, and so does the pattern as data (a heredoc, an inline script, an echo, a grep over transcripts). **Fires at most once per session**, like the branch guard.
-
-- **`block-web.sh`** — `WebFetch` and `WebSearch`. Denies the first call of each per session with a message redirecting to Chrome MCP, which is far more reliable: WebFetch hits cert failures and stale page caches Chrome doesn't, and WebSearch is not Google (its results are weak). **Fires once per session per tool, not twice** — after the nudge, subsequent calls of that tool in the same session pass through, so a session where Chrome MCP genuinely isn't connected can still fall back. Marker files at `~/.claude/hooks/state/webfetch-warned-<session-id>` / `websearch-warned-<session-id>` record the warning; markers older than 7 days are garbage-collected on each invocation. No Haiku stage and no logging — the tool name is unambiguous, nothing to adjudicate.
-
-### UserPromptSubmit
-
-- **`note-pick-text.sh`** — catches user prompts carrying step-viewer pick text (the STEP viewer's copy blobs: `file:`/`solid:`/`edge:`/`faceA:`/`faceB:`/`click:` lines, recognized by their three-decimal coordinate triples) and injects `additionalContext` instead of blocking anything. The note points the agent at the format's home (`web/public/js/viewer/pick-format.js`, with verbatim samples in `web/tests/pick-format.test.js`), asks it to echo its decoded identification of each pick before changing geometry, and tells it the part nothing in a pasted blob reveals: the channel is two-way — the viewer's Find box accepts the same format pasted back, opens the `file:` line's file, and highlights every pick, so the agent should emit pick lines when pointing the user at geometry, composed from CadQuery geometry with the viewer repo's `hardware/scripts/pick_text.py` (round-trip tested against the parser). **Fires once per session, not twice**, via `~/.claude/hooks/state/pick-noted-<session-id>` (same 7-day GC). Applies only inside a repo that carries the viewer (found by walking up from cwd); bails silently anywhere else. No Haiku stage and no logging — the coordinate-triple signature is unambiguous, nothing to adjudicate.
-
-## How the two-stage hooks work
-
-The effort hook on Stop and the residue and measurement hooks on PostToolUse follow the same shape:
-
-1. Read the text to judge: the assistant's final message from the session transcript, or the new content of the write.
-2. Reduce it to what is judged — the Stop hook and the residue hook strip backtick-delimited spans (so docs that quote a hook's own trigger patterns don't fire the hook on itself); the measurement hook keeps Markdown whole, reduces `.py`/`.scad` to comment text, and strips existing markers.
-3. Run a **cheap regex pre-filter**. If nothing matches, exit silently.
-4. If the regex matches, extract a window of context around the match — ±800 chars for the Stop hook, ±600 for the write hooks.
-5. Send the window to **Claude Haiku 4.5** with a classification prompt that distinguishes the targeted pattern from the look-alike (effort vs projection; residue vs description; derivable dimension vs external literal).
-6. If Haiku classifies as the targeted pattern, emit the block or the note. The residue hook adds a third stage — Opus 5 on the whole file against the calibration — which can overturn Haiku.
-
-The staging keeps API cost down (most events never reach a model) while keeping the catch precise (the model sees real context, not just the matched fragment).
-
-## Logging
-
-`block-effort-estimate.sh`, `block-residue.sh`, and `block-underived-measurement.sh` each append one JSONL line per event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
-
-- `loop_guard` — re-entry from a revision attempt, skipped (Stop hooks)
-- `no_transcript` / `no_assistant_message` / `empty_or_short_text` / `empty_text` / `empty_after_strip` / `window_empty` — nothing to check (Stop hooks)
-- `wrong_tool` / `skipped_calibration` / `skipped_memory` / `skipped_non_prose` / `empty_or_short` / `no_calibration_files` — file or tool filtered out (`block-residue.sh`)
-- `skipped_filetype` / `no_docgen_repo` / `empty_after_strip` — file filtered out: not `.md`/`.py`/`.scad`, not inside a `tools/docgen` repo, or no prose left after stripping comments and markers (`block-underived-measurement.sh`)
-- `already_warned_this_session` — session marker exists from a prior nudge in the same session; hook passes through (`block-residue.sh` and `block-underived-measurement.sh`); `lost_claim_race` — a parallel invocation claimed the session's one warning first (`block-underived-measurement.sh`)
-- `regex_no_match` — pre-filter didn't match; **Stop-hook log lines include `last_400_chars` of the response so you can see what slipped through**
-- `no_api_key` — `~/.claude/anthropic_api_key` is missing
-- `haiku_no_response` — Haiku call made but empty response (timeout, network failure, etc.)
-- `stale_read` — the reader's wait expired and the message judged is the newest text on disk, which may predate this turn; the run continues and logs its verdict as usual
-- `regex_match` — the pre-filter matched, logged **before** the window, the API call and the verdict (`block-effort-estimate.sh`). A `regex_match` with no verdict line after it is an invocation that died — timeout, or a stage exiting non-zero — and without it a death and a clean miss are the same silence
-- `allowed` — the model classified as the look-alike; nothing emitted
-- `blocked` — a Stop hook emitted a block
-- `flagged` — a write hook emitted its note; `overturned` — the residue hook's third stage disagreed with Haiku and nothing was emitted
-
-The verdict is read as the **first word** of Haiku's reply. With `max_tokens: 5` it answers bare (`effort`) about as often as it opens a sentence (`effort. The flagged phrase`), and a whole-string compare reads the second shape as a word matching no case — which falls through to allowed.
-
-The `regex_no_match` lines are the diagnostic surface for tuning. If a pattern slips through in normal use, grep the log:
-
-```sh
-grep regex_no_match ~/.claude/hooks/logs/effort-estimate.jsonl | tail
-```
-
-Identify the shape that got past, add it to the regex pattern in the script.
-
-`block-web.sh`, `note-pick-text.sh`, the `Bash` guards, and `warn-elevation-write.sh` do not log. They are a tool-name match, a prompt-text match, command-pattern matches and a path test, with no staged decision to diagnose.
-
-## Installing
-
-1. Clone this repo somewhere on your machine.
-2. Run `./install.sh` from the repo root — it makes the hooks executable and prints the base path to reference them by.
-3. Drop your Anthropic API key into `~/.claude/anthropic_api_key` (for the two-stage hooks; plain text, one line, no quotes).
-4. Wire the hooks up in `~/.claude/settings.json` by absolute path into the clone — `examples/settings.json` is the live wiring, verbatim. One source of truth on disk: edit in the clone, run from the clone, commit and push from the clone.
-
-## Tuning
-
-The regex pattern is one line near the top of each two-stage script. Extend it as you find slips in the log. The Haiku stage filters out matches that don't fit the pattern definition: a regex that matches widely costs an API call per match but does not block on the look-alike.
-
-The classification prompts are also in each script. If Haiku classifies in a direction other than what you want, the prompt is where you'd adjust the examples or definitions.
-
-The `reason` message — what the assistant sees when blocked — is a `jq -n` literal near the bottom of each script. Rewrite it however you want it to read.
-
-## Files
-
-- `hooks/_last_assistant_text.py` — the turn's final text, waited for (shared by the Stop hooks)
-- `hooks/block-effort-estimate.sh` — effort-estimate hook (Stop, regex + Haiku two-stage)
-- `hooks/block-residue.sh` — residue note (PostToolUse on writes, regex + Haiku + Opus three-stage)
-- `hooks/block-underived-measurement.sh` — underived-measurement note (PostToolUse on writes, regex + Haiku two-stage)
-- `hooks/warn-elevation-write.sh` — elevation speed bump (PreToolUse on writes, one bounce per file per session)
-- `hooks/block-branch.sh` — branch-creation guard (PreToolUse on Bash, command-pattern match, once per session)
-- `hooks/block-task-sleep-poll.sh` — task-file sleep-poll guard (PreToolUse on Bash, command-pattern match, once per session)
-- `hooks/block-web.sh` — web-tool redirect (PreToolUse on WebFetch|WebSearch, once per session per tool)
-- `hooks/note-pick-text.sh` — step-viewer pick-text note (UserPromptSubmit, once-per-session context injection)
-- `examples/settings.json` — the `hooks` block of `~/.claude/settings.json`, verbatim
+`_last_assistant_text.py` reads the final message for the Stop hook. The three model-calling
+hooks read `~/.claude/anthropic_api_key` and log one line per run to `~/.claude/hooks/logs/`.
