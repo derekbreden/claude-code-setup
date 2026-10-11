@@ -2,16 +2,6 @@
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "*",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/deliver-relay-message.sh",
-            "timeout": 10
-          }
-        ]
-      },
-      {
         "matcher": "Edit|Write|MultiEdit|NotebookEdit",
         "hooks": [
           {
@@ -27,21 +17,6 @@
           {
             "type": "command",
             "command": "$HOME/Developer/claude-code-setup/hooks/block-branch.sh",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/block-flash-before-commit.sh",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/block-no-ignore.sh",
-            "timeout": 10
-          },
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/block-publish-below-floor.sh",
             "timeout": 10
           },
           {

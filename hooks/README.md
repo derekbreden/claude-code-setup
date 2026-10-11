@@ -1,6 +1,6 @@
 # hooks
 
-Claude Code hooks, referenced by absolute path from `~/.claude/settings.json`; `examples/settings.json` is that file's `hooks` block, verbatim. Two Stop hooks judge the assistant's final message: one blocks effort estimates, and one refuses a stop that claims to be waiting on background work nothing is running — that one also runs on SubagentStop, so a subagent's final report meets it before a manager reads it. Two PostToolUse hooks read what a write left on disk and hand back a note rather than a denial: residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). Eight PreToolUse hooks gate tool calls: one on every tool delivers relay messages queued for the session; one on writes is a one-bounce speed bump at the elevation every future session reads as Derek (CLAUDE.md, AGENTS.md, the calibration); five on `Bash` deny branch creation, a firmware flash from a dirty tree, an `rg` search with `.gitignore` disabled, a video publish that hasn't cleared the floor, and a sleep loop on a harness task's own output file; one on `WebFetch` and `WebSearch` denies the first call of each per session with a redirect to Chrome MCP. One hook injects context: when a prompt carries step-viewer pick text, it points the agent at the format's home and at the fact the channel is two-way. Three scripts sit in the tree unwired: `block-question-as-disagreement.sh`, `block-commit-curation.sh`, and `note-inherited-fence.sh`.
+Claude Code hooks, referenced by absolute path from `~/.claude/settings.json`; `examples/settings.json` is that file's `hooks` block, verbatim. A Stop hook judges the assistant's final message and blocks effort estimates. Two PostToolUse hooks read what a write left on disk and hand back a note rather than a denial: residue (justification, defense, decision narrative — the author going beyond describing what is), and underived measurements (bare dimensional literals that should be docgen markers fed from a source constant). Four PreToolUse hooks gate tool calls: one on writes is a one-bounce speed bump at the elevation every future session reads as Derek (CLAUDE.md, AGENTS.md, the calibration); two on `Bash` deny branch creation and a sleep loop on a harness task's own output file; one on `WebFetch` and `WebSearch` denies the first call of each per session with a redirect to Chrome MCP. One hook injects context: when a prompt carries step-viewer pick text, it points the agent at the format's home and at the fact the channel is two-way.
 
 This is a personal tool, put on GitHub in case it helps someone running similar configurations. It is not a polished, configurable, cross-platform library — read the next section before assuming it'll work for you.
 
@@ -21,9 +21,9 @@ You will *not* get value from this if:
 
 ## The hooks
 
-### Stop and SubagentStop
+### Stop
 
-The message these judge comes from **`_last_assistant_text.py`**, and getting it is not the one-liner it looks like. A turn's closing transcript lines are routinely `thinking` and `tool_use` records — assistant lines holding no text — so the last assistant *line* yields an empty message. And the hook fires while the record it was fired for is still being written, so the newest text on disk belongs to the previous turn. The reader takes the last assistant record that actually carries text, and waits (bounded at 2 s, ending the moment fresh text lands) for one younger than 5 s. A read that never goes fresh is judged anyway and logged `stale_read`, since a turn whose last text predates a long tool run is a legitimate shape.
+The message it judges comes from **`_last_assistant_text.py`**, and getting it is not the one-liner it looks like. A turn's closing transcript lines are routinely `thinking` and `tool_use` records — assistant lines holding no text — so the last assistant *line* yields an empty message. And the hook fires while the record it was fired for is still being written, so the newest text on disk belongs to the previous turn. The reader takes the last assistant record that actually carries text, and waits (bounded at 2 s, ending the moment fresh text lands) for one younger than 5 s. A read that never goes fresh is judged anyway and logged `stale_read`, since a turn whose last text predates a long tool run is a legitimate shape.
 
 - **`block-effort-estimate.sh`** — Stop. Catches phrasings like "this'll take a day", "maybe a few hours", "weeks not months", "a couple of weeks". An effort estimate from an LLM is not tied to reality: it is pattern-matched from training data, where humans wrote estimates of work they were doing — work the LLM will do entirely differently. Two-stage: a regex pre-filter, then Haiku on a ±800-char window around the match. The block message asks the assistant to rewrite without one.
 
@@ -40,17 +40,9 @@ These run after a write has landed, so what they return arrives as context: the 
 
 These run before specific tool calls. A deny is the only PreToolUse outcome whose message reaches the model, so the once-per-session hooks deny the first call and step aside after.
 
-- **`deliver-relay-message.sh`** — matcher `*`. Receives explicit `jsonl2md.py send --defer` messages from `~/.claude/hooks/relay-inbox/<sessionId>/`. Each tool call claims pending files once, even when hooks run concurrently. `interrupt` denies the imminent tool to carry the message; `nudge` adds context without blocking. A short sender label and UTC send time precede the text. Expired messages are preserved in `expired/` and omitted from delivery; old entries without `expires_at` expire five minutes after `ts`. Live relay sends use Claude's peer socket and do not depend on this hook.
-
 - **`warn-elevation-write.sh`** — `Write` / `Edit` / `MultiEdit` / `NotebookEdit`. A speed bump on writes to the elevation every future session reads as Derek: any CLAUDE.md or AGENTS.md, and homesodamachine's `calibration/`. The first attempt on a given file is denied with an advisory — a rule wanting to be written there is usually a TODO for a gap in the repo — and repeating the same call goes through. Allowed, not forbidden: the one bounce is the warning. `Bash` is not covered.
 
 - **`block-branch.sh`** — `Bash`. Catches commands that create or publish a git branch: `git checkout -b`/`-B`, `git switch -c`/`-C`, `git branch <newname>`, `git worktree add`, `gh pr create`, and `git push -u`/`--set-upstream` to a non-`main` branch. Work happens directly on `main` in the one shared worktree, where simultaneous agents surface conflicts in real time; a branch gives no isolation there and just hides work from the other agents on the same checkout. Listing/deleting/renaming branches (`git branch`, `-d`/`-D`, `-m`), returning to `main`, and pushing `main` pass. Scope is the ambient cwd's repo only: a command that explicitly operates on another checkout — a leading `cd`/`pushd`, or `git -C`/`--git-dir` — is fork/PR work where branches are the point, and passes untouched. The git/gh token is matched only at a command boundary, so a branch word inside a commit message, echo, or grep never trips. **Fires at most once per session**: the first offending command is denied with the convention, and the guard steps aside for the rest of the session rather than walling a deliberate branch.
-
-- **`block-flash-before-commit.sh`** — `Bash`. Catches commands that *execute* a firmware flash — `tools/flash.sh <env>` (without the build-only `build` arg) or `pio`/`platformio run … -t`/`--target upload` — while the working tree is dirty, and denies them. `pre_build.py` stamps `FW_VERSION` into every build from the git rev, so an uncommitted flash bakes `<sha>-dirty` into the binary: a build that maps to no commit and can't be traced back to the source running on the chip. Dirtiness is the same `git status --porcelain` test `pre_build.py` uses, so it denies exactly the flashes that would stamp `-dirty`; build-only runs, clean-tree flashes, and mere mentions of the script (`cat`/`ls`/`grep tools/flash.sh`) pass. Detection is anchored to command position, so the path appearing as an argument doesn't trip it. **Fires once per session, not twice** — after the first nudge, a deliberate retry in the same session passes through (a dirty test-flash on hardware is sometimes the point), via a `~/.claude/hooks/state/flash-warned-<session-id>` marker with the same 7-day GC. The deny message states the convention and lists what's uncommitted.
-
-- **`block-no-ignore.sh`** — `Bash`. Denies an `rg` invocation that disables `.gitignore`: `--no-ignore` and the other `--no-ignore-*` variants, `--unrestricted`, and `-u`/`-uu` (bundled shorts like `-iu` count; `-U` is multiline and does not). `rg` respects `.gitignore` by default and that is the point: the real signal lives in tracked files, while `web/node_modules` and the Python venvs hold tens of thousands of vendored lines that bury a search and turn it into a false negative read off a truncated screen. The flag is scoped to the `rg` segment of a pipeline, so a downstream `| sort -u` or `python -u` does not trip it; `grep -r` and `find` flood the same way with no flag to catch, and stay out of reach. **Nudges once per session, then passes through** — a deliberate retry scoped to a path is allowed. Per-session marker + 7-day GC.
-
-- **`block-publish-below-floor.sh`** — `Bash`. Catches `marketing/thumbnail/make.sh <source> <output> "HEADLINE"`, the first ship action of the video publish chain (`marketing/video/workflow.md`), when the cut it is building for has no overlays sidecar — a feature-stripped cut with no title card, freeze, or SFX, against "the pipeline is the floor" (`marketing/video/principles.md`). It derives the working dir from the source-frame arg by walking up to the dir holding `cutlist.json`; sidecar present passes silently, sidecar absent redirects, working dir not locatable passes (fail-open). Anchored to command position, so `cat`/`ls`/`grep` of the script don't match. **Nudges once per session, then passes through** — a music-bed Tier-2 clip legitimately ships without overlays. Per-session marker + 7-day GC.
 
 - **`block-task-sleep-poll.sh`** — `Bash`. Denies a command that both sleeps and names a harness task file (`.../tasks/<id>.output`) — the shape of `until [ -s … ]; do sleep 10; done` and `sleep 180; cat …/tasks/….output`. The harness re-invokes the session when a background task exits; a wait spent on a clock is time bought for nothing, and it is bounded by the Bash timeout rather than by the job. Sleeping on something the harness does not track — a CI run, a deploy, a dev server's port, another agent's lock — passes untouched, and so does the pattern as data (a heredoc, an inline script, an echo, a grep over transcripts). **Fires at most once per session**, like the branch guard.
 
@@ -59,14 +51,6 @@ These run before specific tool calls. A deny is the only PreToolUse outcome whos
 ### UserPromptSubmit
 
 - **`note-pick-text.sh`** — catches user prompts carrying step-viewer pick text (the STEP viewer's copy blobs: `file:`/`solid:`/`edge:`/`faceA:`/`faceB:`/`click:` lines, recognized by their three-decimal coordinate triples) and injects `additionalContext` instead of blocking anything. The note points the agent at the format's home (`web/public/js/viewer/pick-format.js`, with verbatim samples in `web/tests/pick-format.test.js`), asks it to echo its decoded identification of each pick before changing geometry, and tells it the part nothing in a pasted blob reveals: the channel is two-way — the viewer's Find box accepts the same format pasted back, opens the `file:` line's file, and highlights every pick, so the agent should emit pick lines when pointing the user at geometry, composed from CadQuery geometry with the viewer repo's `hardware/scripts/pick_text.py` (round-trip tested against the parser). **Fires once per session, not twice**, via `~/.claude/hooks/state/pick-noted-<session-id>` (same 7-day GC). Applies only inside a repo that carries the viewer (found by walking up from cwd); bails silently anywhere else. No Haiku stage and no logging — the coordinate-triple signature is unambiguous, nothing to adjudicate.
-
-### In the tree, not wired
-
-- **`block-question-as-disagreement.sh`** — Stop. Catches "I notice X — was that intended?" / "Did you mean to Y?" / "Is that on purpose?" when the assistant frames a structural disagreement as a question. Two-stage like the effort hook; the block message asks the assistant to state the disagreement directly. Genuine information-gathering questions pass through.
-
-- **`note-inherited-fence.sh`** — PostToolUse on `Task|Agent` (a synchronous subagent's result) and UserPromptSubmit on turns carrying a `<task-notification>` block (a background subagent's result). Catches a limit claim arriving from *another* agent and injects `additionalContext` naming it as an inherited fence: a conclusion produced by an agent with the reader's own failure mode, to probe (does it carry its price? what do the run's two ends actually need?) before accumulating it as a tie or relaying it up. Limit-claim regex shapes, no Haiku stage; once per session. It points at `~/Developer/homesodamachine/calibration/Fences.md` and fires only when that file exists, which the tree no longer carries.
-
-- **`block-commit-curation.sh`** — PreToolUse on `Bash`. Denies the git moves an agent makes to keep another agent's changes out of its commit: the curate family (`git add -p/-i/-e`, `restore --staged`, `reset` other than `--soft`, `apply --cached/--index`, `rm --cached`) and the discard family (`reset --hard`, `clean` other than a dry run, `checkout`/`restore` of a worktree path, `checkout -p`, `stash` push), the second with a data-loss line in the message. In the one shared worktree every simultaneous agent's in-progress work shows in `git status`, so a diff bigger than what you touched is the normal state, and a commit names its own paths: `git commit -- <paths>`. Hard deny, every time. `git add -A`/`<files>`/`.`, every form of `git commit`, `reset --soft`, `stash pop/list/show/apply/drop`, `clean -n`, `checkout <branch>`, `git rm <file>` and `git apply <patch>` pass.
 
 ## How the two-stage hooks work
 
@@ -83,7 +67,7 @@ The staging keeps API cost down (most events never reach a model) while keeping 
 
 ## Logging
 
-`block-effort-estimate.sh`, `block-residue.sh`, `block-underived-measurement.sh`, and the unwired `block-question-as-disagreement.sh` and `note-inherited-fence.sh` each append one JSONL line per event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
+`block-effort-estimate.sh`, `block-residue.sh`, and `block-underived-measurement.sh` each append one JSONL line per event to `~/.claude/hooks/logs/<hook-name>.jsonl` with a `status` field identifying which code path was taken:
 
 - `loop_guard` — re-entry from a revision attempt, skipped (Stop hooks)
 - `no_transcript` / `no_assistant_message` / `empty_or_short_text` / `empty_text` / `empty_after_strip` / `window_empty` — nothing to check (Stop hooks)
@@ -98,7 +82,6 @@ The staging keeps API cost down (most events never reach a model) while keeping 
 - `allowed` — the model classified as the look-alike; nothing emitted
 - `blocked` — a Stop hook emitted a block
 - `flagged` — a write hook emitted its note; `overturned` — the residue hook's third stage disagreed with Haiku and nothing was emitted
-- `no_posture_match` / `no_object_match` / `no_tasks_dir` / `waiting_on_person` / `allowed_live` — the wait hook's pass paths: no wait-shaped text, no job named in it, no tasks directory to check, a wait on a person, a live process behind the wait
 
 The verdict is read as the **first word** of Haiku's reply. With `max_tokens: 5` it answers bare (`effort`) about as often as it opens a sentence (`effort. The flagged phrase`), and a whole-string compare reads the second shape as a word matching no case — which falls through to allowed.
 
@@ -110,7 +93,7 @@ grep regex_no_match ~/.claude/hooks/logs/effort-estimate.jsonl | tail
 
 Identify the shape that got past, add it to the regex pattern in the script.
 
-`block-web.sh`, `note-pick-text.sh`, the `Bash` guards, `warn-elevation-write.sh` and `deliver-relay-message.sh` do not log. They are a tool-name match, a prompt-text match, command-pattern matches, a path test and a directory test, with no staged decision to diagnose.
+`block-web.sh`, `note-pick-text.sh`, the `Bash` guards, and `warn-elevation-write.sh` do not log. They are a tool-name match, a prompt-text match, command-pattern matches and a path test, with no staged decision to diagnose.
 
 ## Installing
 
@@ -133,16 +116,9 @@ The `reason` message — what the assistant sees when blocked — is a `jq -n` l
 - `hooks/block-effort-estimate.sh` — effort-estimate hook (Stop, regex + Haiku two-stage)
 - `hooks/block-residue.sh` — residue note (PostToolUse on writes, regex + Haiku + Opus three-stage)
 - `hooks/block-underived-measurement.sh` — underived-measurement note (PostToolUse on writes, regex + Haiku two-stage)
-- `hooks/deliver-relay-message.sh` — relay inbox delivery (PreToolUse on every tool, mailbox drain)
 - `hooks/warn-elevation-write.sh` — elevation speed bump (PreToolUse on writes, one bounce per file per session)
 - `hooks/block-branch.sh` — branch-creation guard (PreToolUse on Bash, command-pattern match, once per session)
-- `hooks/block-flash-before-commit.sh` — flash guard (PreToolUse on Bash, command-pattern match + `git status --porcelain` dirty check, once per session)
-- `hooks/block-no-ignore.sh` — rg ignore guard (PreToolUse on Bash, command-pattern match, once per session)
-- `hooks/block-publish-below-floor.sh` — publish floor guard (PreToolUse on Bash, command-pattern match + sidecar check, once per session)
 - `hooks/block-task-sleep-poll.sh` — task-file sleep-poll guard (PreToolUse on Bash, command-pattern match, once per session)
 - `hooks/block-web.sh` — web-tool redirect (PreToolUse on WebFetch|WebSearch, once per session per tool)
 - `hooks/note-pick-text.sh` — step-viewer pick-text note (UserPromptSubmit, once-per-session context injection)
-- `hooks/block-question-as-disagreement.sh` — question-as-disagreement hook (Stop, regex + Haiku two-stage; not wired)
-- `hooks/block-commit-curation.sh` — commit-curation guard (PreToolUse on Bash, command-pattern match; not wired)
-- `hooks/note-inherited-fence.sh` — inherited-fence note (PostToolUse on Task|Agent + UserPromptSubmit on task-notification turns, once per session; not wired, and inert without `calibration/Fences.md`)
 - `examples/settings.json` — the `hooks` block of `~/.claude/settings.json`, verbatim
