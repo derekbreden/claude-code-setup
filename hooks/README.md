@@ -9,6 +9,7 @@ Wired by absolute path in `~/.claude/settings.json`; `examples/settings.json` is
 | `block-residue.sh` | after a write | Notes justification, defense or decision narrative in what was written (regex, Haiku, then Opus). |
 | `block-underived-measurement.sh` | after a write | Notes a hand-written dimension that should be a docgen marker (regex, then Haiku). |
 | `warn-elevation-write.sh` | before a write | Bounces the first write per session to a CLAUDE.md, AGENTS.md or `calibration/`. |
+| `block-memory-write.sh` | before a write | Bounces the first memory write per session to homesodamachine's `calibration/principle/Memory.md`. |
 | `block-branch.sh` | before Bash | Denies starting or publishing a git branch in the shared checkout. |
 | `block-task-sleep-poll.sh` | before Bash | Denies sleeping on a background task's own output file. |
 | `block-web.sh` | before WebFetch, WebSearch | Denies each tool's first call per session, redirecting to Chrome. |

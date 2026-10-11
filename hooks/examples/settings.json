@@ -8,6 +8,11 @@
             "type": "command",
             "command": "$HOME/Developer/claude-code-setup/hooks/warn-elevation-write.sh",
             "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "$HOME/Developer/claude-code-setup/hooks/block-memory-write.sh",
+            "timeout": 10
           }
         ]
       },
