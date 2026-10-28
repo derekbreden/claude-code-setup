@@ -14,10 +14,12 @@ when native tools are absent. One `install.sh` wires it all into both clients.
 | `hooks/` | Bash guardrail hooks (Stop, PreToolUse, PostToolUse, UserPromptSubmit) — effort estimates, residue, etc. | referenced by absolute path from `~/.claude/settings.json` |
 | `jsonl2md/` | Session export, the cross-runtime `board`/`send` verbs, `delta`/`watch`, and the `/relay` + `/relay-send` commands (`commands/`, doc in `SALON.md`) | `jsonl2md.py` is a CLI; `commands/*.md` are symlinked into `~/.claude/commands/` |
 | `codex/` | The Codex `relay` skill: read either runtime's transcript, send into either runtime | symlinked into `~/.codex/skills/relay/` |
+| `offload/` | Moves archived sessions' transcripts into iCloud Drive behind symlinks and evicts the local copies (doc in `offload/README.md`) | an hourly LaunchAgent rendered from `launchd/` |
 
 The mechanisms differ by design: Claude hooks are discovered through `settings.json`,
-Claude slash commands under `~/.claude/commands/`, and Codex skills under
-`~/.codex/skills/`. `install.sh` performs all three registrations.
+Claude slash commands under `~/.claude/commands/`, Codex skills under
+`~/.codex/skills/`, and the offload job by launchd. `install.sh` performs all four
+registrations.
 
 ## Install
 
@@ -26,8 +28,9 @@ Claude slash commands under `~/.claude/commands/`, and Codex skills under
 ```
 
 Symlinks every `jsonl2md/commands/*.md` into `~/.claude/commands/`, the Codex relay skill
-into `~/.codex/skills/`, ensures the hooks are executable, and prints the base path to
-reference them from `~/.claude/settings.json`. Re-runnable. The `settings.json` hook
+into `~/.codex/skills/`, ensures the hooks are executable, prints the base path to
+reference them from `~/.claude/settings.json`, and renders and loads the transcript-offload
+LaunchAgent. Re-runnable. The `settings.json` hook
 entries are hand-curated and not rewritten by the script.
 
 See [`jsonl2md/SALON.md`](jsonl2md/SALON.md) for the `/relay` pull shortcut — bringing one
