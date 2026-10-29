@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
-"""Keep the Claude Code transcripts of archived sessions in iCloud Drive.
+"""Keep the transcripts of archived Claude Code and Codex sessions in iCloud Drive.
 
-A session is offloaded once none of its files has been written for --hours
-and the desktop app no longer shows it in the sidebar: the app has it
+A Claude Code session is offloaded once none of its files has been written for
+--hours and the desktop app no longer shows it in the sidebar: the app has it
 archived, or has no record of it. Its transcripts (the session's, its
 subagents', and the copies Claude Code sets aside) and its spilled tool
 results of 64 KB or more move into iCloud Drive under "Agent
-transcripts/claude/projects", and a symlink takes each one's place. A copy
-that iCloud reports uploaded, and that has also gone --hours without a write,
-is evicted from this disk.
+transcripts/claude/projects", and a symlink takes each one's place.
 
-The desktop app reads a transcript only from a regular file, so it shows an
-offloaded session's transcript as unavailable. The CLI reads and appends
-through the symlinks, downloading an evicted copy. A session that is back in
-the sidebar gets its files back on the next run.
+A Codex rollout of 64 KB or more in ~/.codex/archived_sessions moves the same
+way once it has gone --hours without a write, under "Agent
+transcripts/codex/archived_sessions". A rollout the Codex app has unarchived
+into ~/.codex/sessions gets its file back on the next run.
+
+Any copy under "Agent transcripts" that iCloud reports uploaded, and that has
+also gone --hours without a write, is evicted from this disk.
+
+The Claude desktop app reads a transcript only from a regular file, so it
+shows an offloaded session's transcript as unavailable. The CLI reads and
+appends through the symlinks, downloading an evicted copy. A session that is
+back in the sidebar gets its files back on the next run.
 
 The default dry run lists what would change; --apply does it. The hourly
 LaunchAgent that install.sh loads runs it with --apply; see README.md.
@@ -34,8 +40,11 @@ import time
 
 PROJECTS = Path.home() / ".claude" / "projects"
 APP_SESSIONS = Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"
-MIRROR = (Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
-          / "Agent transcripts" / "claude" / "projects")
+ICLOUD = (Path.home() / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
+          / "Agent transcripts")
+MIRROR = ICLOUD / "claude" / "projects"
+CODEX = Path.home() / ".codex"
+CODEX_MIRROR = ICLOUD / "codex" / "archived_sessions"
 LOCK = Path.home() / ".config" / "transcript-offload" / "lock"
 MIN_BYTES = 64 * 1024
 SF_DATALESS = 0x40000000  # st_flags bit of a file whose data lives only in iCloud
@@ -99,7 +108,7 @@ def last_write(path):
 
 
 def offloaded(path):
-    return path.is_symlink() and Path(os.readlink(path)).is_relative_to(MIRROR)
+    return path.is_symlink() and Path(os.readlink(path)).is_relative_to(ICLOUD)
 
 
 def offloadable(path, project):
@@ -109,9 +118,8 @@ def offloadable(path, project):
             and path.stat().st_size >= MIN_BYTES)
 
 
-def offload(path, project):
-    """Move a file into the mirror and leave a symlink to it; never overwrite."""
-    dst = MIRROR / project.name / path.relative_to(project)
+def offload(path, dst):
+    """Move a file to dst in iCloud Drive and leave a symlink to it; never overwrite."""
     if dst.exists() or dst.is_symlink():
         dst = dst.with_name(f"{dst.stem}.{time.strftime('%Y%m%d-%H%M%S')}{dst.suffix}")
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -136,9 +144,48 @@ def restore(link):
     return copied
 
 
+def codex(args, cutoff, stamp):
+    """Offload idle archived Codex rollouts and bring back the ones the app has unarchived."""
+    moved = moved_bytes = restored = failed = 0
+    for dirpath, _, names in os.walk(CODEX / "sessions"):
+        for name in names:
+            link = Path(dirpath) / name
+            if not (link.is_symlink() and Path(os.readlink(link)).is_relative_to(CODEX_MIRROR)):
+                continue
+            if args.apply:
+                try:
+                    restore(link)
+                except OSError as e:
+                    print(f"  failed  {link}: {e}")
+                    failed += 1
+                    continue
+            restored += 1
+            print(f"  {'restored' if args.apply else 'would restore'}  codex  {link.name}")
+    archive = CODEX / "archived_sessions"
+    for path in sorted(archive.iterdir()) if archive.is_dir() else []:
+        if path.is_symlink() or not path.is_file():
+            continue
+        st = path.stat()
+        if st.st_size < MIN_BYTES or st.st_mtime >= cutoff:
+            continue
+        if args.apply:
+            try:
+                offload(path, CODEX_MIRROR / path.name)
+            except OSError as e:
+                print(f"  failed  {path}: {e}")
+                failed += 1
+                continue
+        moved += 1
+        moved_bytes += st.st_size
+    print(f"{stamp} :: codex archived sessions {'moved' if args.apply else 'would move'} "
+          f"{moved_bytes / 1e9:.2f} GB in {moved} file(s); "
+          f"{'restored' if args.apply else 'would restore'} {restored} unarchived")
+    return failed
+
+
 def resident(cutoff):
-    """Mirror files still held on this disk that have gone the idle time unwritten."""
-    for dirpath, _, names in os.walk(MIRROR):
+    """iCloud copies still held on this disk that have gone the idle time unwritten."""
+    for dirpath, _, names in os.walk(ICLOUD):
         for name in names:
             p = Path(dirpath) / name
             st = p.lstat()
@@ -176,11 +223,13 @@ def main():
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     cutoff = time.time() - args.hours * 3600
     shown = in_sidebar()
-    if shown is None:
-        print(f"{stamp} :: no desktop app session records under {APP_SESSIONS}; nothing moved")
-        return 1
     moved = moved_bytes = restored = restored_bytes = idle = active = sidebar = failed = 0
-    for project in sorted(d for d in PROJECTS.iterdir() if d.is_dir() and not d.is_symlink()):
+    projects = sorted(d for d in PROJECTS.iterdir() if d.is_dir() and not d.is_symlink())
+    if shown is None:
+        print(f"{stamp} :: no desktop app session records under {APP_SESSIONS}; "
+              "no Claude Code session moved")
+        projects, failed = [], 1
+    for project in projects:
         for sid, files in sessions(project):
             if sid in shown:
                 sidebar += 1
@@ -212,7 +261,7 @@ def main():
                 done = []
                 for f, n in zip(todo, sizes):
                     try:
-                        offload(f, project)
+                        offload(f, MIRROR / project.name / f.relative_to(project))
                         done.append(n)
                     except OSError as e:
                         print(f"  failed  {f}: {e}")
@@ -224,7 +273,8 @@ def main():
             moved += len(sizes)
             moved_bytes += sum(sizes)
 
-    held = dict(resident(cutoff)) if MIRROR.is_dir() else {}
+    failed += codex(args, cutoff, stamp)
+    held = dict(resident(cutoff)) if ICLOUD.is_dir() else {}
     evicted = evicted_bytes = pending = 0
     if args.apply and held:
         try:

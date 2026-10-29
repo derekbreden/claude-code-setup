@@ -1,17 +1,24 @@
 # offload
 
-`transcript_offload.py` keeps the transcripts of archived Claude Code sessions
-in iCloud Drive instead of on this Mac's disk. A session moves once the desktop
-app no longer shows it in the sidebar, because it is archived or the app has no
-record of it, and none of its files has been written for a day. Its
-transcripts and spilled tool results of 64 KB or more go to
+`transcript_offload.py` keeps the transcripts of archived Claude Code and Codex
+sessions in iCloud Drive instead of on this Mac's disk. A Claude Code session
+moves once the desktop app no longer shows it in the sidebar, because it is
+archived or the app has no record of it, and none of its files has been written
+for a day. Its transcripts and spilled tool results of 64 KB or more go to
 `iCloud Drive/Agent transcripts/claude/projects/<project>/` under their
-original relative paths, and a symlink takes each one's place. An iCloud copy
-is evicted from the disk once iCloud reports it uploaded and it has gone a day
-without a write. The app's Settings → Claude Code → Archive inactive sessions
-decides when an idle session leaves the sidebar.
+original relative paths, and a symlink takes each one's place. The app's
+Settings → Claude Code → Archive inactive sessions decides when an idle session
+leaves the sidebar.
 
-The desktop app reads a transcript only from a regular file inside real
+A Codex rollout of 64 KB or more in `~/.codex/archived_sessions` moves to
+`iCloud Drive/Agent transcripts/codex/archived_sessions/` once it has gone a day
+without a write, with a symlink in its place. A rollout the Codex app has
+unarchived into `~/.codex/sessions` gets its file back on the next run.
+
+Any iCloud copy under `Agent transcripts` is evicted from the disk once iCloud
+reports it uploaded and it has gone a day without a write.
+
+The Claude desktop app reads a transcript only from a regular file inside real
 directories, so it shows an offloaded session's transcript as unavailable.
 Unarchiving the session brings its files back on the next run. The Claude Code
 CLI reads and appends through the symlinks, and iCloud downloads an evicted
