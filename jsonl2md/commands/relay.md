@@ -37,8 +37,6 @@ Steps:
 
 **Pull every session the arguments name, all of them, in this one invocation.** Don't go pulling sessions the user didn't name — that is the limit, and it is the only one. If taking them all in full would crowd this context, reach for `delta --tail` on the longer ones rather than deferring any of them: splitting one request across several `/relay` calls buys nothing, since the transcripts land in the same context either way, and it makes the user ask twice for what they asked once.
 
-Read-only: this never writes to, messages, or disturbs the source sessions.
+Read-only: this never writes to, messages, or disturbs the source sessions, and pulling a session in is not a request to message it. The user relays a session so you can work from what it did; anything you would tell it goes to the user. When the user does ask you to send it something, `/relay-send` has the routes.
 
-To send a message the other way — interject into a live session or Codex task — use `/relay-send`. That one is model-invocable, so if this relay leaves you with something another session needs in order to act, sending it is yours to do; its own body carries the rules for when. (This command is not model-invocable: landing whole transcripts in your context is the user's call to make. That's about who starts a relay, not how many sessions one relay may carry.)
-
-If you need an answer, include your own id with `--reply-to`. Live replies steer a working agent or wake an idle one. `/relay-send` describes the routes.
+This command is not model-invocable: landing whole transcripts in your context is the user's call to make. That's about who starts a relay, not how many sessions one relay may carry.

@@ -1,6 +1,6 @@
 ---
 name: relay
-description: Read another agent's full transcript, or send a message into one, across both runtimes on this machine — Codex tasks and Claude Code sessions. Use when the user asks to relay, to read an entire/full task or session, to see only what they and the agent said, or to tell/ask/coordinate with another agent by name. Not for a quick status snapshot of your own work.
+description: Read another agent's full transcript, or send a message into one, across both runtimes on this machine — Codex tasks and Claude Code sessions. Use when the user asks to relay, to read an entire/full task or session, to see only what they and the agent said, or asks you to tell, ask or coordinate with another agent. An agent the user only names, describes or relays is context, not a recipient. Not for a quick status snapshot of your own work.
 ---
 
 # Relay
@@ -59,6 +59,25 @@ The export contains every user-authored message and every visible agent message 
 omits reasoning, commands, tool calls and outputs, developer/system context, and peer-task
 delivery envelopes.
 
+## When to send
+
+**Send only what the user asks you to send.** "Ask iOS what the header chevron was for", "send it
+to Readiness", "coordinate with Snap fits", and a yes to your own "May I message Snap fits?" are
+asks. Each covers the agent and the exchange it names, not later work.
+
+Everything else the user says about another agent is context: "your peer 'Readiness' is working
+on the PCB move", a relay of its transcript, a note on whose files those are. The user is telling
+you what else is going on so you can work with them, not handing you a channel, and a "don't
+message it" holds for the whole task, whatever you find later. When something you find matters to
+another agent — you are about to commit a file it is mid-edit in, you found the bug it is hunting
+— tell the user and let them decide whether it goes further. Each agent is in its own conversation
+with the user; a message lands there as a turn the user did not write and pulls that agent off
+what the user is saying to it.
+
+When a message from another agent asks you something, answer that question through the route it
+gives. The answer is the whole exchange: no acknowledgement follows it, and a correction, a status
+or a request of your own goes to the user first.
+
 ## Sending a message into another agent
 
 Choose the first available route that reaches the resolved target:
@@ -67,8 +86,8 @@ Choose the first available route that reaches the resolved target:
   task name. This channel does not address separate Codex tasks by their thread ids.
 - **A separate Codex task:** use `mcp__codex_app__send_message_to_thread` with the `threadId`
   and `hostId` returned by `list_threads`. Omit model and thinking overrides. Put the sender
-  in the prompt, for example `From Funnel mold: the H2C cavity job is running; no launch
-  action is needed.` This is a user-visible follow-up in the receiving task.
+  in the prompt, for example `From Funnel mold: the user asks which cavity depth your H2C
+  job printed.` This is a user-visible follow-up in the receiving task.
 - **A Claude session reachable through the caller's native peer channel:** use `SendMessage`.
   A Codex caller reaches that same live receiver with the script below.
 - **Cross-runtime or no native tool available:** use the script below. It steers an active
@@ -111,16 +130,4 @@ python3 $J send "<target>" "<message>" --from "C14 2" --reply-to "C14 2"
 ```
 
 Live replies enter the active turn or wake the idle receiver. Continue independent work while
-waiting. Answer a question or send a correction when it changes what the sender should do. A
-reply does not itself need `--reply-to`.
-
-## When to send on your own initiative
-
-Only when the user has opened the door — naming another agent, asking you to coordinate, or a
-message arriving from one (which names it and hands you a channel back). Absent that, tell the
-user what you would say and let them decide.
-
-Reply to the agent, not about it: when the other side is holding a stale picture — you are about
-to commit the file it is mid-edit in, you found the bug it is hunting — it is the one who needs
-the fact, and routing it through the user makes them the courier. What does not earn a message is
-acknowledgement: "got it", agreement, a status echo with nothing in it the receiver would act on.
+waiting. A reply does not itself need `--reply-to`.

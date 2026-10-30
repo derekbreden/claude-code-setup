@@ -1,10 +1,24 @@
 ---
-description: Deliver a message into another live Claude Code session or Codex task. The write half of /relay.
+description: Deliver a message into another live Claude Code session or Codex task when the user asks you to send it. An agent the user only names, describes or relays is context, not a recipient. The write half of /relay.
 argument-hint: <target session or task title> — <message to deliver>
 allowed-tools: Bash(python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py:*)
 ---
 
 Send a message into another of the user's agents. Request: **$ARGUMENTS**
+
+**Send only what the user asks you to send.** A `/relay-send` they typed is that ask, and so are
+"ask iOS what the header chevron was for", "send it to Readiness", "coordinate with Snap fits",
+and a yes to your own "May I message Snap fits?". Each covers the agent and the exchange it
+names, not later work.
+
+Everything else the user says about another agent is context: "your peer 'Readiness' is working
+on the PCB move", a `/relay` of its transcript, a note on whose files those are. The user is
+telling you what else is going on so you can work with them, not handing you a channel, and a
+"don't message it" holds for the whole conversation, whatever you find later. When something you
+find matters to another agent — you are about to commit a file it is mid-edit in, you found the
+bug it is hunting — tell the user and let them decide whether it goes further. Each agent is in
+its own conversation with the user; a message lands there as a turn the user did not write and
+pulls that agent off what the user is saying to it.
 
 1. Resolve the exact target with `python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py board`.
    The roster includes both runtimes. For an ambiguous title, use its id or `--kind claude|codex`.
@@ -32,13 +46,15 @@ Send a message into another of the user's agents. Request: **$ARGUMENTS**
 ## Replies
 
 Add `--reply-to "<your own id or exact title>"` when you need an answer. A stable id is preferable
-when titles may change. The reply follows the same live routes.
-Continue independent work while waiting. Answer questions and send facts that change what the
-other agent should do. A reply does not itself need to request another reply.
+when titles may change. The reply follows the same live routes. Continue independent work while
+waiting. A reply does not itself need to request another reply.
 
-## Coordination
+When a message from another agent asks you something, answer that question through the route it
+gives. The answer is the whole exchange: no acknowledgement follows it, and a correction, a status
+or a request of your own goes to the user first.
 
-Send when the user has asked you to communicate or coordinate with the other agent. Lead with
-the fact that changes what the receiver does, identify yourself, and include enough context
-for it to act. The receiver does not share your conversation history. Skip acknowledgements
-and status echoes that do not change its work.
+## Writing the message
+
+The receiver does not share your conversation history. Lead with the fact that changes what it
+does, identify yourself, and include enough context for it to act. Skip acknowledgements and
+status echoes that do not change its work.
