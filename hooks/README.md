@@ -5,7 +5,7 @@ Wired by absolute path in `~/.claude/settings.json`; `examples/settings.json` is
 
 | Hook | Runs on | Does |
 | --- | --- | --- |
-| `block-effort-estimate.sh` | Stop | Blocks an effort estimate in the final message (regex, then Haiku). |
+| `block-effort-estimate.sh` | Stop | Blocks an effort estimate in the final message (regex, then Opus 5.5 at low effort). |
 | `block-residue.sh` | after a write | Notes justification, defense or decision narrative in what was written (regex, Haiku, then Opus). |
 | `block-underived-measurement.sh` | after a write | Notes a hand-written dimension that should be a docgen marker (regex, then Haiku). |
 | `warn-elevation-write.sh` | before a write | Bounces the first write per session to a CLAUDE.md, AGENTS.md or `calibration/`. |

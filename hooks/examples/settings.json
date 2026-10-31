@@ -47,7 +47,7 @@
           {
             "type": "command",
             "command": "$HOME/Developer/claude-code-setup/hooks/block-effort-estimate.sh",
-            "timeout": 6
+            "timeout": 15
           }
         ]
       }

@@ -31,8 +31,8 @@ import sys
 import time
 
 TAIL_BYTES = 400_000   # far more than one turn; keeps huge transcripts cheap
-# The wait has to fit inside the hook's 6 s budget alongside a classifier call
-# that curl caps at 3 s, so 2 s is the ceiling that keeps the worst case — stale
+# The wait has to fit inside the hook's 15 s budget alongside a classifier call
+# that curl caps at 10 s, so 2 s is the ceiling that keeps the worst case — stale
 # transcript, slow API — clear of the timeout. It buys a wide margin over the
 # 0.768 s lag measured on a live session.
 MAX_WAIT_S = 2.0

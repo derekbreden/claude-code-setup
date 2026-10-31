@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Block effort estimates in the assistant's last message.
-# Two-stage detection: cheap regex pre-filter, then Haiku disambiguation on a
-# window of context around the candidate phrase(s). Fail-open on any error.
+# Two-stage detection: cheap regex pre-filter, then Opus 5.5 at low effort
+# disambiguating a window of context around the candidate phrase(s). Fail-open
+# on any error.
 #
 # Diagnostic log: every invocation appends one JSONL line to
 # $HOME/.claude/hooks/logs/effort-estimate.jsonl with a "status" field
@@ -75,10 +76,10 @@ if [[ -z "$last_text" || ${#last_text} -lt 40 ]]; then
 fi
 
 # Pre-filter: cheap regex for candidate effort-estimate shapes.
-# If nothing matches, skip the Haiku call entirely.
-# The pattern is intentionally lenient — false positives are cheap (one Haiku
-# call) but false negatives are silent slips. Extend it when the log shows
-# something getting past.
+# If nothing matches, skip the model call entirely.
+# The pattern is lenient: a false positive costs one model call, a false
+# negative is a silent slip. Extend it when the log shows something getting
+# past.
 pattern='([Hh]alf[ \-]+(an?[ ]+)?(hour|day|week|month)|[Aa]n?[ ]+(afternoon|evening|morning|hour|day|week|month|year)s?|[Aa][ ]+few[ ]+(minutes?|hours?|days?|weeks?|months?)|[Aa][ ]+couple[ ]+(of[ ]+)?(minutes?|hours?|days?|weeks?|months?|years?)|(one|two|three|four|five|six|seven|eight|nine|ten)[ ]+(minutes?|hours?|days?|weeks?|months?|years?)|~?[0-9]+[ ]*-?[ ]*(min(ute)?s?|hours?|hrs?|days?|weeks?|wks?|months?|years?|yrs?)([^[:alpha:]]|$)|(minutes?|hours?|days?|weeks?|months?|years?)[ \-]*ish|weeks?[ ]+(,[ ]+)?not[ ]+months?|months?[ ]+(,[ ]+)?not[ ]+weeks?|time-to-[a-z]+|(should|would|will|might)[ ]+take|takes?[ ]+(about|roughly|a)|multi-year|several[ ]+(years?|months?|weeks?))'
 
 if ! printf '%s\n' "$last_text" | grep -qE "$pattern"; then
@@ -120,11 +121,11 @@ if [[ -z "$window" ]]; then
 fi
 
 # Highlight: the exact span the regex matched, widened outward to whole
-# whitespace-delimited tokens plus a little context, then handed to Haiku as
-# "here is the text that triggered this check." This points the classifier at
-# the trigger-in-situ — e.g. the bare match "28 min" surfaces as the token it
-# actually lives in, "DIP-28 mini.tsx" — so a misfire buried in a long window
-# is easy to recognize as a non-duration. The widening is deliberate: a bare
+# whitespace-delimited tokens plus a little context, then handed to the
+# classifier as "here is the text that triggered this check." This points the
+# classifier at the trigger-in-situ — e.g. the bare match "28 min" surfaces as
+# the token it actually lives in, "DIP-28 mini.tsx" — so a misfire buried in a
+# long window is easy to recognize as a non-duration. The widening is deliberate: a bare
 # fragment shown in isolation reads like a real time and biases the classifier
 # the wrong way, so the span always carries its surrounding words. Empty (and
 # the prompt falls back to no highlight) if extraction fails or the span runs
@@ -158,31 +159,41 @@ api_key=$(cat "$api_key_file")
 classification_defs='A cheap regex flagged a possible time/effort estimate in the snippet below. The regex is deliberately lenient and frequently misfires on things that are not durations at all — part numbers ("DIP-28"), filenames ("mini.tsx"), version numbers, quantities, dimensions ("2.54mm"). Decide which of THREE cases applies.
 
 - effort = the text estimates how long someone (especially the assistant itself) will spend doing work. Examples: "this will take a few hours", "half a day of work", "weeks not months", "~4 hours", "maybe a half-day of careful work", "multi-year project".
-- projection = the text describes outcomes, properties, regulatory cadences, or durations of states (NOT work effort). Examples: "guaranteed multi-year loss", "bottle goes flat overnight", "tank lasts months", "for as long as the service operates", "every 5 years on 3AL aluminum", "happily for a year".
+- projection = the text describes outcomes, properties, regulatory cadences, or durations of states (NOT work effort). Examples: "guaranteed multi-year loss", "bottle goes flat overnight", "tank lasts months", "for as long as the service operates", "every 5 years on 3AL aluminum", "happily for a year", "The rebuild is running (about 3 minutes). Then I'\''ll republish the page and push.".
 - none = there is no actual time estimate in the snippet; the regex misfired on text that is not a duration at all.'
 
 # The highlight names the trigger span AND warns about the failure mode that
 # naming a span introduces: focusing on a time-shaped fragment pulls attention
 # off the surrounding word ("soak", "render", "Xometry", "ago") that marks it a
-# process/machine/vendor/past duration rather than work-effort. Measured on 59
-# real flagged windows: the bare "read it in context" phrasing was net-negative
-# (it over-blocked projections); this projection-aware phrasing was the clear
-# winner — it keeps the real effort catches and fixes projection misfires the
-# un-highlighted prompt blocked.
+# process/machine/vendor/past duration rather than work-effort.
 if [[ -n "$highlight" ]]; then
   hl_line=$(printf 'The exact text the regex flagged is: "%s". Decide from the surrounding context, not this fragment alone — these same words often describe a process/cure/soak, a machine/compute/render, a vendor lead time, or a past/elapsed duration, none of which are work-effort. Call it effort only if the context shows someone estimating how long their own hands-on work will take.' "$highlight")
 else
   hl_line=""
 fi
 
+# Opus 5.5's safety classifiers decline the odd harmless window (a watcher that
+# will "kill -9" a job). With "fallbacks": "default" and its beta header, a
+# declined request reruns server-side on the model Anthropic routes that
+# refusal category to.
 body=$(jq -n \
-  --arg model "claude-haiku-4-5" \
+  --arg model "claude-opus-5-5" \
   --arg defs "$classification_defs" \
   --arg hl "$hl_line" \
   --arg msg "$window" \
   '{
     model: $model,
-    max_tokens: 5,
+    fallbacks: "default",
+    max_tokens: 1024,
+    output_config: {
+      effort: "low",
+      format: {type: "json_schema", schema: {
+        type: "object",
+        properties: {verdict: {type: "string", enum: ["effort", "projection", "none"]}},
+        required: ["verdict"],
+        additionalProperties: false
+      }}
+    },
     messages: [{role: "user", content: (
       $defs + "\n\n"
       + (if $hl == "" then "" else $hl + "\n\n" end)
@@ -195,19 +206,18 @@ response=$(curl -sS https://api.anthropic.com/v1/messages \
   -H "x-api-key: $api_key" \
   -H "content-type: application/json" \
   -H "anthropic-version: 2023-06-01" \
-  --max-time 3 \
+  -H "anthropic-beta: server-side-fallback-2026-07-01" \
+  --max-time 10 \
   -d "$body" 2>/dev/null || echo '{}')
 
-# The verdict is the reply's FIRST WORD. `max_tokens` is 5 and Haiku spends them
-# opening a sentence as often as answering bare, so the reply arrives as either
-# "effort" or "effort. The flagged phrase" — and a whole-string read of the
-# second one is a word that matches no case, which falls to allowed. Reading the
-# first alphabetic run takes the verdict out of both shapes and keeps the logged
-# value legible. The budget stays at 5: latency here is what kills invocations.
-classification=$(printf '%s' "$response" | jq -r '.content[0].text // empty' | tr '[:upper:]' '[:lower:]' | grep -oE '[a-z]+' | head -1 || true)
+# The schema holds the reply's text to {"verdict": ...}. Opus can think before
+# it answers, and the thinking arrives as its own content block, empty, ahead of
+# the text, as does the marker of a fallback rerun, so the text is picked out by
+# block type, and `max_tokens` holds the thinking as well as the verdict.
+classification=$(printf '%s' "$response" | jq -r '[.content[]? | select(.type == "text") | .text] | join("") | fromjson? | .verdict // empty' 2>/dev/null || true)
 
 if [[ -z "$classification" ]]; then
-  log_status "haiku_no_response"
+  log_status "opus_no_response"
 elif [[ "$classification" == "effort" ]]; then
   log_status "blocked" "$(jq -nc --arg classification "$classification" --arg highlight "$highlight" '{classification: $classification, highlight: $highlight}')"
   jq -n '{
