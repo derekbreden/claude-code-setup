@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Block effort estimates in the assistant's last message.
+# Block an estimate of how long the assistant's own work will take, in its last
+# message.
 # Two-stage detection: cheap regex pre-filter, then Opus 5.5 at low effort
 # disambiguating a window of context around the candidate phrase(s). Fail-open
 # on any error.
@@ -154,20 +155,30 @@ if [[ ! -f "$api_key_file" ]]; then
 fi
 api_key=$(cat "$api_key_file")
 
-# Instructions + the three-way definitions. The highlight line (if any) and the
-# reply instruction are appended in the jq body assembly below.
-classification_defs='A cheap regex flagged a possible time/effort estimate in the snippet below. The regex is deliberately lenient and frequently misfires on things that are not durations at all — part numbers ("DIP-28"), filenames ("mini.tsx"), version numbers, quantities, dimensions ("2.54mm"). Decide which of THREE cases applies.
+# What the agent is told when the hook blocks. The classifier reads the same
+# words, so it judges a duration by the reason the agent is given.
+effort_reason='An effort estimate from you is not tied to reality. It is pattern-matched from training data, where humans wrote estimates of work they were doing — work you will do entirely differently.'
 
-- effort = the text estimates how long someone (especially the assistant itself) will spend doing work. Examples: "this will take a few hours", "half a day of work", "weeks not months", "~4 hours", "maybe a half-day of careful work", "multi-year project".
-- projection = the text describes outcomes, properties, regulatory cadences, or durations of states (NOT work effort). Examples: "guaranteed multi-year loss", "bottle goes flat overnight", "tank lasts months", "for as long as the service operates", "every 5 years on 3AL aluminum", "happily for a year", "The rebuild is running (about 3 minutes). Then I'\''ll republish the page and push.".
-- none = there is no actual time estimate in the snippet; the regex misfired on text that is not a duration at all.'
+# The setting, the reason, and the three-way definitions. The highlight line (if
+# any) and the reply instruction are appended in the jq body assembly below.
+read -r -d '' classification_defs <<EOF || true
+The snippet below comes from the last message a coding agent (Claude) wrote at the end of a turn, to the person it works for. When the agent puts a number on how long its own work will take, a hook blocks the message and tells it: "$effort_reason"
+
+The agent's own work is the tasks it does itself: writing and changing code, models and documents, and working problems out. It also starts builds, scripts, renders and other agent sessions and waits on them, and it waits on printers, vendors and the person. How long one of those runs is a wait, not the agent's own work, even when the agent started it; how long a whole task of its own will take is its own work, even when the task is made of runs. How long a task will take the person or anyone else is not the agent's own work.
+
+A cheap regex flagged a possible time/effort estimate in the snippet. The regex is deliberately lenient and frequently misfires on things that are not durations at all — part numbers ("DIP-28"), filenames ("mini.tsx"), version numbers, quantities, dimensions ("2.54mm"). Decide which of THREE cases applies.
+
+- effort = the agent puts a number on how long its own work will take. Examples: "this will take a few hours", "half a day of work", "weeks not months", "~4 hours", "maybe a half-day of careful work", "multi-year project".
+- projection = any other duration: a run or a wait, someone else's work, an outcome, a property, a regulatory cadence, or how long a state lasts. Examples: "guaranteed multi-year loss", "bottle goes flat overnight", "tank lasts months", "for as long as the service operates", "every 5 years on 3AL aluminum", "happily for a year", "The rebuild is running (about 3 minutes). Then I'll republish the page and push.".
+- none = there is no actual time estimate in the snippet; the regex misfired on text that is not a duration at all.
+EOF
 
 # The highlight names the trigger span AND warns about the failure mode that
 # naming a span introduces: focusing on a time-shaped fragment pulls attention
 # off the surrounding word ("soak", "render", "Xometry", "ago") that marks it a
 # process/machine/vendor/past duration rather than work-effort.
 if [[ -n "$highlight" ]]; then
-  hl_line=$(printf 'The exact text the regex flagged is: "%s". Decide from the surrounding context, not this fragment alone — these same words often describe a process/cure/soak, a machine/compute/render, a vendor lead time, or a past/elapsed duration, none of which are work-effort. Call it effort only if the context shows someone estimating how long their own hands-on work will take.' "$highlight")
+  hl_line=$(printf 'The exact text the regex flagged is: "%s". Decide from the surrounding context, not this fragment alone — these same words often describe a process/cure/soak, a machine/compute/render, a vendor lead time, or a past/elapsed duration, none of which are the agent'\''s own work. Call it effort only if the context shows the agent putting a number on how long its own work will take.' "$highlight")
 else
   hl_line=""
 fi
@@ -220,10 +231,8 @@ if [[ -z "$classification" ]]; then
   log_status "opus_no_response"
 elif [[ "$classification" == "effort" ]]; then
   log_status "blocked" "$(jq -nc --arg classification "$classification" --arg highlight "$highlight" '{classification: $classification, highlight: $highlight}')"
-  jq -n '{
-    "decision": "block",
-    "reason": "An effort estimate from you is not tied to reality. It is pattern-matched from training data, where humans wrote estimates of work they were doing — work you will do entirely differently. Rewrite the response without putting a number on how long anything will take."
-  }'
+  jq -n --arg reason "$effort_reason Rewrite the response without putting a number on how long your own work will take." \
+    '{decision: "block", reason: $reason}'
 else
   log_status "allowed" "$(jq -nc --arg classification "$classification" --arg highlight "$highlight" '{classification: $classification, highlight: $highlight}')"
 fi
