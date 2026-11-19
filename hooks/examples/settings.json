@@ -29,16 +29,6 @@
             "command": "$HOME/Developer/claude-code-setup/hooks/block-task-sleep-poll.sh"
           }
         ]
-      },
-      {
-        "matcher": "WebFetch|WebSearch",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/Developer/claude-code-setup/hooks/block-web.sh",
-            "timeout": 10
-          }
-        ]
       }
     ],
     "Stop": [

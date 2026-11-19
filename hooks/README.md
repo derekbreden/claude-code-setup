@@ -12,7 +12,6 @@ Wired by absolute path in `~/.claude/settings.json`; `examples/settings.json` is
 | `block-memory-write.sh` | before a write | Bounces the first memory write per session to homesodamachine's `calibration/principle/Memory.md`. |
 | `block-branch.sh` | before Bash | Denies starting or publishing a git branch in the shared checkout. |
 | `block-task-sleep-poll.sh` | before Bash | Denies sleeping on a background task's own output file. |
-| `block-web.sh` | before WebFetch, WebSearch | Denies each tool's first call per session, redirecting to Chrome. |
 | `note-pick-text.sh` | a prompt | Points a prompt carrying `/3d` pick text at the format and the Find box. |
 
 `_last_assistant_text.py` reads the final message for the Stop hook. The three model-calling
