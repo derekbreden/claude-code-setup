@@ -63,9 +63,11 @@ thinking back on the next step.
 
 OpenCode takes the model's context window to be 1,048,576 tokens and summarizes a session only
 near that size, so the request stays in front of the model word for word and each step re-reads
-everything. `limit.context` for the model in `opencode.jsonc` is 131,072, which makes OpenCode
+everything. `limit.input` for the model in `opencode.jsonc` is 131,072, which makes OpenCode
 summarize from about 111,000 tokens. The model then works from a summary it wrote itself, with its
-own doubts in it.
+own doubts in it. `limit.context` set to the same number moves the summary to the same point but
+leaves the summary request about 10,000 output tokens, and a summary that needs more ends the
+session with "Compaction summary reached the output token limit".
 
 ## Session title
 
