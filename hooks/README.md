@@ -1,7 +1,8 @@
 # hooks
 
 Wired by absolute path in `~/.claude/settings.json`; `examples/settings.json` is that file's
-`hooks` block. Each script's header says how it works.
+`hooks` block. Each script's header says how it works. OpenCode sessions run the same hooks
+through [`../opencode/claude-hooks`](../opencode/README.md).
 
 | Hook | Runs on | Does |
 | --- | --- | --- |

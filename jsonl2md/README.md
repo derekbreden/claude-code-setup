@@ -158,8 +158,8 @@ homesodamachine commit's `Session:` trailer carries. Claude Code exports
 `CLAUDE_CODE_SESSION_ID` to every command it runs, and the desktop app's record for that id
 holds the title; a title you didn't set comes back marked `(auto-generated)`. A
 VSCode-extension session is titled from the extension's state, a Codex task by its thread's
-name from `CODEX_THREAD_ID`, and a session titled nowhere by its id. Outside an agent
-session it exits 1.
+name from `CODEX_THREAD_ID`, an OpenCode session from its database by `OPENCODE_SESSION_ID`,
+and a session titled nowhere by its id. Outside an agent session it exits 1.
 
 ### The rules under test: `selftest`
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wire this repo's Claude Code and Codex customizations into their clients.
+# Wire this repo's Claude Code, Codex and OpenCode customizations into their clients.
 #
 # This is the single place that registers everything touching ~/.claude, so the
 # convention can't drift: add an artifact, register it here. Re-runnable.
@@ -31,7 +31,15 @@ ln -sfn "$REPO/codex/skills/relay" "$HOME/.codex/skills/relay"
 echo
 echo "skill    -> ~/.codex/skills/relay"
 
-# 4) The transcript offload is a LaunchAgent: every hour it moves the transcripts
+# 4) OpenCode loads plugin directories from ~/.config/opencode/plugins/. Expose the tracked
+#    hook plugin there, so OpenCode sessions run the hooks settings.json names. Its
+#    instruction files are named by path in the hand-curated ~/.config/opencode/opencode.jsonc.
+mkdir -p "$HOME/.config/opencode/plugins"
+ln -sfn "$REPO/opencode/claude-hooks" "$HOME/.config/opencode/plugins/claude-hooks"
+echo
+echo "plugin   -> ~/.config/opencode/plugins/claude-hooks"
+
+# 5) The transcript offload is a LaunchAgent: every hour it moves the transcripts
 #    of archived sessions into iCloud Drive and brings back any session that has
 #    returned to the sidebar. The plist is rendered from the tracked template
 #    (launchd resolves nothing itself: no $HOME, no PATH lookup) and

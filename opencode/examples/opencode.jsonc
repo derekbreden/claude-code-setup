@@ -1,0 +1,70 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+
+  // The open-weight 27B model this app is set up for.
+  "model": "openrouter/thinkingmachines/inkling-2-mini",
+
+  // What Claude Code supplies on its own: how memory notes work, and how to treat Derek's Chrome.
+  // A project's own opencode.jsonc loads that project's MEMORY.md index.
+  "instructions": [
+    "~/Developer/claude-code-setup/opencode/memory.md",
+    "~/Developer/claude-code-setup/opencode/chrome.md",
+  ],
+
+  "experimental": {
+    "todo": true,
+  },
+
+  "mcp": {
+    "servers": {
+      // Derek's running Chrome on this Mac, through chrome://inspect/#remote-debugging.
+      "chrome": {
+        "type": "local",
+        "command": ["/usr/local/bin/npx", "-y", "chrome-devtools-mcp@1.14.0", "--autoConnect"],
+        "environment": {
+          "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        },
+      },
+    },
+  },
+
+  // Everything runs without asking except the rules below. The last matching rule wins.
+  "permissions": [
+    // Commands that discard uncommitted work. Other sessions share the checkout.
+    { "action": "shell", "resource": "git reset --hard *", "effect": "ask" },
+    { "action": "shell", "resource": "git reset * --hard*", "effect": "ask" },
+    { "action": "shell", "resource": "git clean *", "effect": "ask" },
+    { "action": "shell", "resource": "git checkout -- *", "effect": "ask" },
+    { "action": "shell", "resource": "git checkout * -- *", "effect": "ask" },
+    { "action": "shell", "resource": "git checkout .", "effect": "ask" },
+    { "action": "shell", "resource": "git restore *", "effect": "ask" },
+    { "action": "shell", "resource": "git restore --staged *", "effect": "allow" },
+    { "action": "shell", "resource": "git stash *", "effect": "ask" },
+    { "action": "shell", "resource": "git stash list *", "effect": "allow" },
+    { "action": "shell", "resource": "git stash show *", "effect": "allow" },
+    { "action": "shell", "resource": "git push --force*", "effect": "ask" },
+    { "action": "shell", "resource": "git push * --force*", "effect": "ask" },
+    { "action": "shell", "resource": "git push -f *", "effect": "ask" },
+    { "action": "shell", "resource": "git push * -f", "effect": "ask" },
+    { "action": "shell", "resource": "git push * -f *", "effect": "ask" },
+    { "action": "shell", "resource": "rm -rf *", "effect": "ask" },
+    { "action": "shell", "resource": "rm -fr *", "effect": "ask" },
+    { "action": "shell", "resource": "rm -r *", "effect": "ask" },
+    { "action": "shell", "resource": "rm -R *", "effect": "ask" },
+
+    // Chrome: reading a page and navigating run without asking. Anything that acts on a page asks.
+    { "action": "chrome_*", "resource": "*", "effect": "ask" },
+    { "action": "chrome_list_pages", "resource": "*", "effect": "allow" },
+    { "action": "chrome_select_page", "resource": "*", "effect": "allow" },
+    { "action": "chrome_new_page", "resource": "*", "effect": "allow" },
+    { "action": "chrome_navigate_page", "resource": "*", "effect": "allow" },
+    { "action": "chrome_wait_for", "resource": "*", "effect": "allow" },
+    { "action": "chrome_take_snapshot", "resource": "*", "effect": "allow" },
+    { "action": "chrome_take_screenshot", "resource": "*", "effect": "allow" },
+    { "action": "chrome_hover", "resource": "*", "effect": "allow" },
+    { "action": "chrome_list_console_messages", "resource": "*", "effect": "allow" },
+    { "action": "chrome_get_console_message", "resource": "*", "effect": "allow" },
+    { "action": "chrome_list_network_requests", "resource": "*", "effect": "allow" },
+    { "action": "chrome_get_network_request", "resource": "*", "effect": "allow" },
+  ],
+}

@@ -74,6 +74,11 @@ COOKIE_DB = os.path.join(CLAUDE_APP_DIR, "Cookies")
 KEYCHAIN_SERVICE = "Claude Safe Storage"
 KEYCHAIN_ACCOUNT = "Claude Key"
 CODEX_HOME = os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex"))
+# OpenCode keeps every session in one SQLite file. OPENCODE_DB names another one, and a
+# relative value resolves under the data directory, as `opencode debug paths db` reports.
+_OPENCODE_DATA = os.path.join(
+    os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "opencode")
+OPENCODE_DB = os.path.join(_OPENCODE_DATA, os.environ.get("OPENCODE_DB") or "opencode.db")
 
 # --- cloud sessions ---------------------------------------------------------
 #
@@ -2083,11 +2088,14 @@ def own_session_name(cwd=DEFAULT_CWD):
     app's record for that id holds the sidebar title. titleSource "user" marks a title you
     set; any other title is the app's own and comes back marked "(auto-generated)". A
     VSCode-extension session takes its title from the extension's state. Codex exports
-    CODEX_THREAD_ID, and the thread's name is the task title. A session titled nowhere
-    comes back as its id. Outside an agent session the answer is None.
+    CODEX_THREAD_ID, and the thread's name is the task title. OpenCode's shell tool exports
+    OPENCODE_SESSION_ID, and its database holds the title; a subagent's session answers
+    with the title of the session that started it. A session titled nowhere comes back as
+    its id. Outside an agent session the answer is None.
     """
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
     tid = os.environ.get("CODEX_THREAD_ID", "").strip()
+    oid = os.environ.get("OPENCODE_SESSION_ID", "").strip()
     if sid and (caller_has_peer_channel() or not tid):
         for p in glob.glob(f"{META_ROOT}/*/*/local_*.json"):
             try:
@@ -2114,13 +2122,30 @@ def own_session_name(cwd=DEFAULT_CWD):
         if row and row["name"]:
             return row["name"]
         return tid
+    if oid:
+        title = None
+        try:
+            with _sqlite_readonly(OPENCODE_DB) as db:
+                current = oid
+                for _ in range(8):
+                    row = db.execute(
+                        "SELECT title, parent_id FROM session_v2 WHERE id = ?", (current,)).fetchone()
+                    if not row:
+                        break
+                    title = row["title"]
+                    if not row["parent_id"]:
+                        break
+                    current = row["parent_id"]
+        except (OSError, sqlite3.Error):
+            title = None
+        return title or oid
     return None
 
 
 def cmd_whoami(args):
     name = own_session_name(args.cwd)
     if not name:
-        sys.stderr.write("No CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID here: "
+        sys.stderr.write("No CLAUDE_CODE_SESSION_ID, CODEX_THREAD_ID or OPENCODE_SESSION_ID here: "
                          "this process is not inside an agent session.\n")
         return 1
     print(name)
