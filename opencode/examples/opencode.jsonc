@@ -6,17 +6,29 @@
 
   // Each key is read from its own file. Claude's is the one the hooks use.
   "providers": {
+    // Every model here runs at max effort on every request. A body entry is sent whatever the
+    // app's effort picker says, so a lower pick does not lower it.
     "thinkingmachines": {
       "settings": { "apiKey": "{file:~/.config/opencode/tinker_api_key}" },
-      // Summarize a session from about 111,000 tokens. At the lab's full window OpenCode never
-      // does, and the model re-reads everything on each step. The input limit sets that point and
-      // leaves the summary the model's whole output allowance.
       "models": {
-        "thinkingmachines/Inkling-2-Mini": { "limit": { "input": 131072 } },
+        "thinkingmachines/Inkling-2-Mini": {
+          // Summarize a session from about 111,000 tokens. At the lab's full window OpenCode
+          // never does, and the model re-reads everything on each step. The input limit sets
+          // that point and leaves the summary the model's whole output allowance.
+          "limit": { "input": 131072 },
+          "body": {
+            "thinking": { "type": "adaptive", "display": "summarized" },
+            "output_config": { "effort": "max" },
+          },
+        },
       },
     },
     "anthropic": {
       "settings": { "apiKey": "{file:~/.claude/anthropic_api_key}" },
+      "models": {
+        "claude-opus-5-5": { "body": { "output_config": { "effort": "max" } } },
+        "claude-sonnet-5-5": { "body": { "output_config": { "effort": "max" } } },
+      },
     },
   },
 

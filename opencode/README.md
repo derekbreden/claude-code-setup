@@ -69,6 +69,14 @@ own doubts in it. `limit.context` set to the same number moves the summary to th
 leaves the summary request about 10,000 output tokens, and a summary that needs more ends the
 session with "Compaction summary reached the output token limit".
 
+## Effort
+
+Derek runs every model at max effort. OpenCode's own default sends Claude adaptive thinking with no
+effort named and sends Inkling no thinking setting at all, and its picker's choice lasts only for
+the session it was made in. In `opencode.jsonc` each model's `body` entry names max effort, and
+OpenCode sends a `body` entry on every request, over whatever the picker says. A headless run can
+also name it in the model id: `anthropic/claude-opus-5-5#max`.
+
 ## Session title
 
 OpenCode's shell tool exports `OPENCODE_SESSION_ID` to every command it runs.
