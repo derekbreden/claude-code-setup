@@ -1,0 +1,10 @@
+#!/bin/zsh
+# grep as Claude Code's own shell runs it on this Mac: the ugrep built into the claude binary,
+# which honours ignore files and skips .git and binary files, so a whole-tree `grep -r` does not
+# walk build outputs. Falls back to the system grep for the options ugrep reads differently.
+for a in "$@"; do
+  case "$a" in -*-filter*|-*-pager*|-*-view*|-*-format-open*|-*-config*|---*|-@*|-*-save-config*|-[Zz]*|-[!-]*[Zz]*|--null|--null-data) exec /usr/bin/grep "$@" ;; esac
+done
+claude="$HOME/.local/bin/claude"
+[[ -x "$claude" ]] || exec /usr/bin/grep "$@"
+ARGV0=ugrep exec "$claude" -G --ignore-files --hidden -I --encoding=UTF-8 --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl "$@"

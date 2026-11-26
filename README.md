@@ -15,7 +15,7 @@ notes; the relay does not reach them. One `install.sh` wires it all into the thr
 | `hooks/` | Bash guardrail hooks (Stop, PreToolUse, PostToolUse, UserPromptSubmit) — effort estimates, residue, etc. | referenced by absolute path from `~/.claude/settings.json` |
 | `jsonl2md/` | Session export, the cross-runtime `board`/`send` verbs, `delta`/`watch`, and the `/relay` + `/relay-send` commands (`commands/`, doc in `SALON.md`) | `jsonl2md.py` is a CLI; `commands/*.md` are symlinked into `~/.claude/commands/` |
 | `codex/` | The Codex `relay` skill: read either runtime's transcript, send into either runtime | symlinked into `~/.codex/skills/relay/` |
-| `opencode/` | The plugin that runs these hooks inside OpenCode, and the memory and Chrome instructions its sessions get (doc in `opencode/README.md`) | the plugin is symlinked into `~/.config/opencode/plugins/`; the instructions are named in `~/.config/opencode/opencode.jsonc` |
+| `opencode/` | The plugin that runs these hooks inside OpenCode, the plugin that gives its shell Claude Code's `grep` and `find`, and the memory and Chrome instructions its sessions get (doc in `opencode/README.md`) | the plugins are symlinked into `~/.config/opencode/plugins/`; the instructions are named in `~/.config/opencode/opencode.jsonc` |
 | `offload/` | Moves archived sessions' transcripts into iCloud Drive behind symlinks and evicts the local copies (doc in `offload/README.md`) | an hourly LaunchAgent rendered from `launchd/` |
 
 The mechanisms differ by design: Claude hooks are discovered through `settings.json`,
@@ -30,7 +30,7 @@ by launchd. `install.sh` performs all five registrations.
 ```
 
 Symlinks every `jsonl2md/commands/*.md` into `~/.claude/commands/`, the Codex relay skill
-into `~/.codex/skills/`, the OpenCode hook plugin into `~/.config/opencode/plugins/`, ensures
+into `~/.codex/skills/`, the OpenCode plugins into `~/.config/opencode/plugins/`, ensures
 the hooks are executable, prints the base path to reference them from
 `~/.claude/settings.json`, and renders and loads the transcript-offload LaunchAgent.
 Re-runnable. The `settings.json` hook entries and `~/.config/opencode/opencode.jsonc` are

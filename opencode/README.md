@@ -6,6 +6,7 @@ sessions have: the hooks in [`../hooks/`](../hooks/README.md) and the memory not
 | File | What it is | How it reaches OpenCode |
 | --- | --- | --- |
 | `claude-hooks/` | A plugin that runs the command hooks named in `~/.claude/settings.json` and in a project's `.claude/settings.json` | symlinked into `~/.config/opencode/plugins/` by `install.sh` |
+| `shell-tools/` | A plugin that puts `shell-tools/bin/` first on the path of every shell command, so `grep` and `find` are the ones Claude Code's shell runs | symlinked into `~/.config/opencode/plugins/` by `install.sh` |
 | `memory.md` | How memory notes are read and written | listed under `instructions` in `~/.config/opencode/opencode.jsonc` |
 | `chrome.md` | How to treat Derek's Chrome | the same `instructions` list |
 | `examples/opencode.jsonc` | `~/.config/opencode/opencode.jsonc`: the model, the instructions, the Chrome server and the permission rules | hand-curated in place and mirrored here |
@@ -36,6 +37,18 @@ something or failed.
 Not carried: `SessionStart` and the events not in the table, `updatedInput`, `continue: false`,
 hooks of a type other than `command`, and OpenCode's `patch` tool, which GPT models get in place
 of `edit` and `write`.
+
+## Shell tools
+
+In Claude Code's Bash tool on this Mac, `grep` and `find` are shell functions over the ugrep and
+bfs built into the `claude` binary: ignore files are honoured, and `.git` and binary files are
+skipped. OpenCode's shell tool runs the system's. A whole-tree `grep -r` there walks build outputs
+and caches, runs for minutes, passes its timeout and is left running in the background.
+
+`shell-tools/bin/grep` and `shell-tools/bin/find` are those two commands as scripts, with the same
+arguments Claude Code's shell snapshot passes, and the plugin puts that folder at the front of
+`PATH` in the shell tool's `create.before` hook. Each falls back to the system command when
+`~/.local/bin/claude` is missing.
 
 ## Session title
 

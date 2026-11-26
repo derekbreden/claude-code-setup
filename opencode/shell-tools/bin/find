@@ -1,0 +1,5 @@
+#!/bin/zsh
+# find as Claude Code's own shell runs it on this Mac: the bfs built into the claude binary.
+claude="$HOME/.local/bin/claude"
+[[ -x "$claude" ]] || exec /usr/bin/find "$@"
+ARGV0=bfs exec "$claude" -S dfs -regextype findutils-default "$@"
