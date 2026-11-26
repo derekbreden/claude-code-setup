@@ -32,15 +32,18 @@ echo
 echo "skill    -> ~/.codex/skills/relay"
 
 # 4) OpenCode loads plugin directories from ~/.config/opencode/plugins/. Expose the tracked
-#    plugins there: claude-hooks, so OpenCode sessions run the hooks settings.json names, and
-#    shell-tools, so its shell runs the grep and find that Claude Code's shell runs. The
+#    plugins there: claude-hooks, so OpenCode sessions run the hooks settings.json names,
+#    shell-tools, so its shell runs the grep and find that Claude Code's shell runs, and
+#    inkling-thinking, so Inkling 2 Mini keeps its thinking from one step to the next. The
 #    instruction files are named by path in the hand-curated ~/.config/opencode/opencode.jsonc.
 mkdir -p "$HOME/.config/opencode/plugins"
 ln -sfn "$REPO/opencode/claude-hooks" "$HOME/.config/opencode/plugins/claude-hooks"
 ln -sfn "$REPO/opencode/shell-tools" "$HOME/.config/opencode/plugins/shell-tools"
+ln -sfn "$REPO/opencode/inkling-thinking" "$HOME/.config/opencode/plugins/inkling-thinking"
 echo
 echo "plugin   -> ~/.config/opencode/plugins/claude-hooks"
 echo "plugin   -> ~/.config/opencode/plugins/shell-tools"
+echo "plugin   -> ~/.config/opencode/plugins/inkling-thinking"
 
 # 5) The transcript offload is a LaunchAgent: every hour it moves the transcripts
 #    of archived sessions into iCloud Drive and brings back any session that has

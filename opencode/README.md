@@ -7,9 +7,10 @@ sessions have: the hooks in [`../hooks/`](../hooks/README.md) and the memory not
 | --- | --- | --- |
 | `claude-hooks/` | A plugin that runs the command hooks named in `~/.claude/settings.json` and in a project's `.claude/settings.json` | symlinked into `~/.config/opencode/plugins/` by `install.sh` |
 | `shell-tools/` | A plugin that puts `shell-tools/bin/` first on the path of every shell command, so `grep` and `find` are the ones Claude Code's shell runs | symlinked into `~/.config/opencode/plugins/` by `install.sh` |
+| `inkling-thinking/` | A plugin that keeps Inkling 2 Mini's thinking in its context from one tool step to the next | symlinked into `~/.config/opencode/plugins/` by `install.sh` |
 | `memory.md` | How memory notes are read and written | listed under `instructions` in `~/.config/opencode/opencode.jsonc` |
 | `chrome.md` | How to treat Derek's Chrome | the same `instructions` list |
-| `examples/opencode.jsonc` | `~/.config/opencode/opencode.jsonc`: the model, the instructions, the Chrome server and the permission rules | hand-curated in place and mirrored here |
+| `examples/opencode.jsonc` | `~/.config/opencode/opencode.jsonc`: the model and its context window, the instructions, the Chrome server and the permission rules | hand-curated in place and mirrored here |
 
 A project loads its own memory index with an `instructions` entry in its `opencode.jsonc`, as
 homesodamachine's does.
@@ -49,6 +50,22 @@ and caches, runs for minutes, passes its timeout and is left running in the back
 arguments Claude Code's shell snapshot passes, and the plugin puts that folder at the front of
 `PATH` in the shell tool's `create.before` hook. Each falls back to the system command when
 `~/.local/bin/claude` is missing.
+
+## Inkling 2 Mini
+
+Two things let Inkling 2 Mini weigh what it finds against what it was asked. Without both, it
+finds that a request rests on something untrue and goes on building.
+
+The lab streams each thinking block with an empty signature, and OpenCode replays only signed
+thinking, so the model sees its earlier tool calls without its reasons. `inkling-thinking/` adds a
+placeholder signature to each unsigned block in the lab's stream, and OpenCode then sends the
+thinking back on the next step.
+
+OpenCode takes the model's context window to be 1,048,576 tokens and summarizes a session only
+near that size, so the request stays in front of the model word for word and each step re-reads
+everything. `limit.context` for the model in `opencode.jsonc` is 131,072, which makes OpenCode
+summarize from about 111,000 tokens. The model then works from a summary it wrote itself, with its
+own doubts in it.
 
 ## Session title
 
