@@ -1,8 +1,18 @@
 {
   "$schema": "https://opencode.ai/config.json",
 
-  // The open-weight 27B model this app is set up for.
-  "model": "openrouter/thinkingmachines/inkling-2-mini",
+  // The open-weight 27B model this app is set up for, served by its lab.
+  "model": "thinkingmachines/thinkingmachines/Inkling-2-Mini",
+
+  // Each key is read from its own file. Claude's is the one the hooks use.
+  "providers": {
+    "thinkingmachines": {
+      "settings": { "apiKey": "{file:~/.config/opencode/tinker_api_key}" },
+    },
+    "anthropic": {
+      "settings": { "apiKey": "{file:~/.claude/anthropic_api_key}" },
+    },
+  },
 
   // What Claude Code supplies on its own: how memory notes work, and how to treat Derek's Chrome.
   // A project's own opencode.jsonc loads that project's MEMORY.md index.
