@@ -161,6 +161,22 @@ VSCode-extension session is titled from the extension's state, a Codex task by i
 name from `CODEX_THREAD_ID`, an OpenCode session from its database by `OPENCODE_SESSION_ID`,
 and a session titled nowhere by its id. Outside an agent session it exits 1.
 
+Its second line is the commit's `Model:` trailer as it stands: the app, the model and the
+effort, each read from that session's own record.
+
+```text
+Memory and git practices review (auto-generated)
+Model: Claude Code, claude-fable-5-2, max effort
+```
+
+The desktop app's record names a Claude Code session's model, the transcript's last
+assistant line names it for a session with no such record, and `CLAUDE_EFFORT` in the
+caller's environment is the caller's own effort. A Claude Code helper's shell carries its
+lead's session id, so the model named there is the lead's. Codex's thread row holds the
+model and the reasoning effort. OpenCode's session row holds the model id; its effort is the
+one `opencode.jsonc` sends for that model on every request, or else the one the run named.
+A part no record holds is left out.
+
 ### The rules under test: `selftest`
 
 ```sh

@@ -81,7 +81,9 @@ also name it in the model id: `anthropic/claude-opus-5-5#max`.
 
 OpenCode's shell tool exports `OPENCODE_SESSION_ID` to every command it runs.
 [`jsonl2md.py whoami`](../jsonl2md/README.md#who-you-are-whoami) reads that session's title from
-OpenCode's database, so a commit's `Session:` trailer names the session.
+OpenCode's database, so a commit's `Session:` trailer names the session. It reads the session's
+model from the same row, so the commit's `Model:` trailer and a memory note's `model` line name
+the model that wrote them.
 
 ## Trying a change
 

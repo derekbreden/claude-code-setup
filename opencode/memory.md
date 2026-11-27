@@ -18,10 +18,13 @@ name: <short-kebab-case-slug>
 description: <one-line summary, used later to decide relevance>
 metadata:
   type: user | feedback | project | reference
+  model: <app, model, effort>
 ---
 
 <the fact. For feedback and project notes, follow with **Why:** and **How to apply:** lines. Link related notes as [[their-name]].>
 ```
+
+`model` is the `Model:` line that `python3 ~/Developer/claude-code-setup/jsonl2md/jsonl2md.py whoami` prints, without its label. It names the app and model that wrote the note.
 
 - `user`: who the user is, their role, expertise and preferences.
 - `feedback`: guidance the user gave on how to work, corrections and confirmed approaches alike, with the reason.

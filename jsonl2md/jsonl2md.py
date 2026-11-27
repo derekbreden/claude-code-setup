@@ -2142,6 +2142,124 @@ def own_session_name(cwd=DEFAULT_CWD):
     return None
 
 
+def _transcript_model(sid):
+    """The model on the last main-thread assistant line of a Claude Code transcript."""
+    for path in glob.glob(os.path.join(JSONL_ROOT, "*", f"{sid}.jsonl")):
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 400_000))
+                tail = f.read().decode("utf-8", "replace")
+        except OSError:
+            continue
+        for row in reversed(tail.splitlines()):
+            if '"assistant"' not in row:
+                continue
+            try:
+                rec = json.loads(row)
+            except ValueError:
+                continue
+            model = (rec.get("message") or {}).get("model")
+            if rec.get("type") == "assistant" and not rec.get("isSidechain") and model and model != "<synthetic>":
+                return model
+    return None
+
+
+def _jsonc(text):
+    """JSON with comments and trailing commas, as OpenCode's settings file is written."""
+    out, i, in_string = [], 0, False
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if ch == "\\":
+                out.append(text[i + 1:i + 2])
+                i += 1
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+            out.append(ch)
+        elif text.startswith("//", i):
+            i = text.find("\n", i)
+            if i < 0:
+                break
+            continue
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end < 0 else end + 2
+            continue
+        else:
+            out.append(ch)
+        i += 1
+    return json.loads(re.sub(r",(\s*[}\]])", r"\1", "".join(out)))
+
+
+def _opencode_settings_effort(provider, model):
+    """The effort OpenCode's settings send for a model on every request, over the picker's choice."""
+    path = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+                        "opencode", "opencode.jsonc")
+    try:
+        with open(path) as f:
+            settings = _jsonc(f.read())
+        return settings["providers"][provider]["models"][model]["body"]["output_config"]["effort"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def own_session_model():
+    """The calling agent's app, model and effort, read from the session's own record.
+
+    The desktop app's record for CLAUDE_CODE_SESSION_ID names the session's model; a session
+    with no such record is read from the last assistant line of its transcript. CLAUDE_EFFORT
+    in the caller's environment is the caller's own effort. A Claude Code helper's shell
+    carries its lead's session id, so the model named there is the lead's. Codex's thread row
+    holds `model` and `reasoning_effort`. OpenCode's session row holds the model id; its effort
+    is the one the settings file sends for that model on every request, or else the one the
+    run named, which the row holds as `variant`. A part no record holds is left out. Outside
+    an agent session the answer is None.
+    """
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID", "").strip()
+    tid = os.environ.get("CODEX_THREAD_ID", "").strip()
+    oid = os.environ.get("OPENCODE_SESSION_ID", "").strip()
+    app = model = effort = None
+    if sid and (caller_has_peer_channel() or not tid):
+        app = "Claude Code"
+        for p in glob.glob(f"{META_ROOT}/*/*/local_*.json"):
+            try:
+                m = json.load(open(p))
+            except Exception:
+                continue
+            if m.get("cliSessionId") == sid:
+                model, effort = m.get("model"), m.get("effort")
+                break
+        model = model or _transcript_model(sid)
+        effort = os.environ.get("CLAUDE_EFFORT", "").strip() or effort
+    elif tid:
+        app = "Codex"
+        try:
+            with _sqlite_readonly(CODEX_STATE_DB) as db:
+                row = db.execute("SELECT model, reasoning_effort FROM threads WHERE id = ?", (tid,)).fetchone()
+            if row:
+                model, effort = row["model"], row["reasoning_effort"]
+        except (OSError, sqlite3.Error):
+            pass
+    elif oid:
+        app = "OpenCode"
+        try:
+            with _sqlite_readonly(OPENCODE_DB) as db:
+                row = db.execute("SELECT model FROM session_v2 WHERE id = ?", (oid,)).fetchone()
+            spec = json.loads(row["model"]) if row and row["model"] else {}
+            model = spec.get("id")
+            effort = _opencode_settings_effort(spec.get("providerID"), model) or (
+                spec.get("variant") if spec.get("variant") != "default" else None)
+        except (OSError, sqlite3.Error, ValueError, AttributeError):
+            pass
+    if not app:
+        return None
+    return ", ".join([app] + ([model] if model else []) + ([f"{effort} effort"] if effort else []))
+
+
 def cmd_whoami(args):
     name = own_session_name(args.cwd)
     if not name:
@@ -2149,6 +2267,7 @@ def cmd_whoami(args):
                          "this process is not inside an agent session.\n")
         return 1
     print(name)
+    print(f"Model: {own_session_model()}")
     return 0
 
 
