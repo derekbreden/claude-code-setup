@@ -9,7 +9,7 @@ through [`../opencode/claude-hooks`](../opencode/README.md).
 | `block-effort-estimate.sh` | Stop | Blocks an estimate of how long the agent's own work will take in the final message (regex, then Opus 5.5 at low effort). |
 | `block-residue.sh` | after a write | Notes justification, defense or decision narrative in what was written (regex, Haiku, then Opus). |
 | `block-underived-measurement.sh` | after a write | Notes a hand-written dimension that should be a docgen marker (regex, then Haiku). |
-| `warn-elevation-write.sh` | before a write | Bounces the first write per session to a CLAUDE.md, AGENTS.md or `calibration/`. |
+| `warn-elevation-write.sh` | before a write | Bounces the first write per session to a CLAUDE.md, AGENTS.md or `calibration/`, and names `git why` for a line's history. |
 | `block-memory-write.sh` | before a write | Bounces the first memory write per session to homesodamachine's `calibration/principle/Memory.md`. |
 | `block-branch.sh` | before Bash | Denies starting or publishing a git branch in the shared checkout. |
 | `block-task-sleep-poll.sh` | before Bash | Denies sleeping on a background task's own output file. |

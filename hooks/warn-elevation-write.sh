@@ -36,6 +36,6 @@ jq -n --arg f "$file_path" '{
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "deny",
-    "permissionDecisionReason": ("You are writing to \($f) — the elevation every future session reads as Derek. A rule wanting to be written here is usually a TODO for a gap in the repo: the fix that holds is the artifact — changed geometry, a tool, code that teaches by example (calibration/Principle.md). If this write truly belongs at this elevation, repeat the same call and it will go through.")
+    "permissionDecisionReason": ("You are writing to \($f) — the elevation every future session reads as Derek. A rule wanting to be written here is usually a TODO for a gap in the repo: the fix that holds is the artifact — changed geometry, a tool, code that teaches by example (calibration/Principle.md). `git why <path>:<line>` prints what was seen and said when a line was put there. If this write truly belongs at this elevation, repeat the same call and it will go through.")
   }
 }'
