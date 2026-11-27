@@ -53,21 +53,16 @@ arguments Claude Code's shell snapshot passes, and the plugin puts that folder a
 
 ## Inkling 2 Mini
 
-Two things let Inkling 2 Mini weigh what it finds against what it was asked. Without both, it
-finds that a request rests on something untrue and goes on building.
-
 The lab streams each thinking block with an empty signature, and OpenCode replays only signed
 thinking, so the model sees its earlier tool calls without its reasons. `inkling-thinking/` adds a
 placeholder signature to each unsigned block in the lab's stream, and OpenCode then sends the
 thinking back on the next step.
 
-OpenCode takes the model's context window to be 1,048,576 tokens and summarizes a session only
-near that size, so the request stays in front of the model word for word and each step re-reads
-everything. `limit.input` for the model in `opencode.jsonc` is 131,072, which makes OpenCode
-summarize from about 111,000 tokens. The model then works from a summary it wrote itself, with its
-own doubts in it. `limit.context` set to the same number moves the summary to the same point but
-leaves the summary request about 10,000 output tokens, and a summary that needs more ends the
-session with "Compaction summary reached the output token limit".
+OpenCode takes Inkling 2 Mini's context window from its catalog, 1,048,576 tokens, and summarizes a
+session only near that size. On the 26 November CAD scenario Inkling passed three runs of three at
+a 400,000-token input limit and none of three at 131,072, where OpenCode summarized every 25 to 45
+calls; the sessions Derek runs on this repository carry several hundred thousand tokens. The model
+entry sets no limit.
 
 ## Effort
 

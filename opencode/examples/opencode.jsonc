@@ -12,10 +12,6 @@
       "settings": { "apiKey": "{file:~/.config/opencode/tinker_api_key}" },
       "models": {
         "thinkingmachines/Inkling-2-Mini": {
-          // Summarize a session from about 111,000 tokens. At the lab's full window OpenCode
-          // never does, and the model re-reads everything on each step. The input limit sets
-          // that point and leaves the summary the model's whole output allowance.
-          "limit": { "input": 131072 },
           "body": {
             "thinking": { "type": "adaptive", "display": "summarized" },
             "output_config": { "effort": "max" },
