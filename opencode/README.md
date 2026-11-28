@@ -8,7 +8,7 @@ sessions have: the hooks in [`../hooks/`](../hooks/README.md) and the memory not
 | `claude-hooks/` | A plugin that runs the command hooks named in `~/.claude/settings.json` and in a project's `.claude/settings.json` | symlinked into `~/.config/opencode/plugins/` by `install.sh` |
 | `shell-tools/` | A plugin that puts `shell-tools/bin/` first on the path of every shell command, so `grep` and `find` are the ones Claude Code's shell runs | symlinked into `~/.config/opencode/plugins/` by `install.sh` |
 | `inkling-thinking/` | A plugin that keeps Inkling 2 Mini's thinking in its context from one tool step to the next | symlinked into `~/.config/opencode/plugins/` by `install.sh` |
-| `desktop-archive/` | A patch to OpenCode Desktop that puts Archive (and Unarchive) first in the Side tabs list's right-click menu | `patch.py` writes a patched, re-signed copy of `/Applications/OpenCode.app`, swapped in by hand; redone after each update (its README) |
+| `desktop-archive/` | A patch to OpenCode Desktop that puts Archive (and Unarchive) first in the Side tabs list's right-click menus and makes the Home list's Archive button work | `patch.py` writes a patched, re-signed copy of `/Applications/OpenCode.app`, swapped in by hand; redone after each update (its README) |
 | `memory.md` | How memory notes are read and written | listed under `instructions` in `~/.config/opencode/opencode.jsonc` |
 | `chrome.md` | How to treat Derek's Chrome | the same `instructions` list |
 | `examples/opencode.jsonc` | `~/.config/opencode/opencode.jsonc`: the model and its context window, the instructions, the Chrome server and the permission rules | hand-curated in place and mirrored here |

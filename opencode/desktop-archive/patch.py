@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""Give OpenCode Desktop's session list an Archive item in its right-click menu.
+"""Give OpenCode Desktop's session list an Archive item in its right-click menus.
 
 usage: patch.py <original OpenCode.app> <patched OpenCode.app to write>
 
 OpenCode Desktop 2.4.2 archives a session from the command palette ("Archive session",
 Cmd+Shift+S) and from the Inbox layout's right-click menu, both through the service's
-`session.update` with `archived`. The Side tabs layout's right-click menu has no Archive. This
-adds one at the top of that menu: "Archive" on a session that is not archived (it archives it
-and closes its tab, as Cmd+Shift+S does), "Unarchive" on one that is (one opened from Search
-sessions).
+`session.update` with `archived`. The Side tabs layout's right-click menus have no Archive, and the Home
+list's Archive button is stubbed out. This puts "Archive" first in the menu of an open tab
+(archiving it closes the tab, as Cmd+Shift+S does) and of a recent session in the list, with
+"Unarchive" in its place on an archived session (one opened from Search sessions), and makes the
+Home list's button archive.
 
 The app checks its bundled files: Info.plist carries the SHA-256 of app.asar's file index, and
 the index carries each file's SHA-256. The changed script is appended to the end of app.asar,
@@ -16,8 +17,8 @@ its index entry is pointed at the new bytes with their hashes, the index hash in
 updated, and the whole app is signed again ad hoc on this Mac (it no longer carries
 OpenCode's own signature).
 
-It refuses, changing nothing, when the menu's code is not found exactly once: a new OpenCode
-version has moved it, and the anchor below needs a fresh look.
+It refuses, changing nothing, when any anchor is not found exactly once: a new OpenCode version
+has moved that code, and the anchors below need a fresh look.
 """
 import hashlib
 import json
@@ -27,17 +28,35 @@ import struct
 import subprocess
 import sys
 
-ANCHOR = ("L($.Item,{get disabled(){return!e.session},onSelect:()=>ue(`menu`),"
-          "get children(){return t.t(`common.rename`)}})")
-# Inside the session tab component: `e` is the tab's props (session, server, onClose), `h()` the
-# session's server context (its `sdk`), `t` the translations, `YG` the app's toast.
-ITEM = ("L($.Item,{get disabled(){return!e.session||!!e.session.parentID},onSelect:()=>{"
-        "let __s=e.session,__c=h();if(!__s||!__c)return;let __a=__s.time.archived===void 0;"
-        "__c.sdk.api.session.update({sessionID:__s.id,archived:__a})"
-        ".then(()=>{__a&&e.onClose?.()})"
-        ".catch(__e=>YG({title:t.t(`common.requestFailed`),description:String(__e?.message??__e)}))},"
-        "get children(){return t.t(e.session?.time.archived!==void 0?`sidebar.inbox.unarchive`:`common.archive`)}}),")
-MARK = "__a&&e.onClose?.()"
+# Each edit is (anchor, replacement); every anchor must occur exactly once in one renderer script.
+# The item is one component, defined beside the app's own "Mark as unread" item (zQ) and built the
+# same way: `wz()` the translations, `tK().serverCtx(server)` the session's server context with its
+# `sdk`, `$.Item` the menu item, `YG` the app's toast.
+COMPONENT = ("function HSMarchiveItem(e){let t=wz(),n=tK(),r=()=>{let s=e.session,c=n.serverCtx(e.server);"
+             "return s&&c?c.data.session.get(s.id)??s:s};return L($.Item,{get disabled(){let s=r();"
+             "return!s||!!s.parentID},onSelect:()=>{let s=r(),c=n.serverCtx(e.server);if(!s||!c)return;"
+             "let a=s.time.archived===void 0;c.sdk.api.session.update({sessionID:s.id,archived:a})"
+             ".then(()=>{a&&e.onArchived?.()}).catch(x=>YG({title:t.t(`common.requestFailed`),"
+             "description:String(x?.message??x)}))},get children(){let s=r();return t.t(s&&s.time.archived"
+             "!==void 0?`sidebar.inbox.unarchive`:`common.archive`)}})}")
+EDITS = [
+    # the component, ahead of the app's "Mark as unread" item
+    ("function zQ(e){let t=wz(),n=tK(),", COMPONENT + "function zQ(e){let t=wz(),n=tK(),"),
+    # an open tab in the list: first in its menu; archiving closes the tab, as Cmd+Shift+S does
+    ("L($.Item,{get disabled(){return!e.session},onSelect:()=>ue(`menu`),get children(){return t.t(`common.rename`)}})",
+     "L(HSMarchiveItem,{get server(){return e.server},get session(){return e.session},get onArchived(){return e.onClose}}),"
+     "L($.Item,{get disabled(){return!e.session},onSelect:()=>ue(`menu`),get children(){return t.t(`common.rename`)}})"),
+    # a recent session in the list (not open as a tab): first in its menu
+    ("L($.Item,{get disabled(){return!o()},onSelect:()=>r.show(()=>L(aCn,{get title(){return $Z(e.session)},"
+     "onRename:t=>c(e.server,e.session,t)})),get children(){return t.t(`common.rename`)}})",
+     "L(HSMarchiveItem,{get server(){return e.server},get session(){return e.session}}),"
+     "L($.Item,{get disabled(){return!o()},onSelect:()=>r.show(()=>L(aCn,{get title(){return $Z(e.session)},"
+     "onRename:t=>c(e.server,e.session,t)})),get children(){return t.t(`common.rename`)}})"),
+    # the Home list's own Archive button, stubbed out in 2.4.2: the same service call
+    ("archive:async e=>Promise.reject(Error(`Session archiving is unavailable`))",
+     "archive:async e=>r.sdk.api.session.update({sessionID:e,archived:!0})"),
+]
+MARK = "HSMarchiveItem"
 BLOCK = 4 * 1024 * 1024
 
 
@@ -79,14 +98,19 @@ def main():
             continue
         offset, size = int(entry["offset"]), entry["size"]
         text = data[offset:offset + size]
-        if ANCHOR.encode() in text:
+        if MARK.encode() in text:
+            sys.exit("already patched")
+        if EDITS[0][0].encode() in text:
             hits.append((path, entry, text))
-    if len(hits) != 1 or hits[0][2].count(ANCHOR.encode()) != 1:
-        sys.exit(f"the session menu's code was found {sum(h[2].count(ANCHOR.encode()) for h in hits)} times, not once: nothing changed")
+    if len(hits) != 1:
+        sys.exit(f"the session menus' code was found in {len(hits)} scripts, not one: nothing changed")
     path, entry, text = hits[0]
-    if MARK.encode() in text:
-        sys.exit("already patched")
-    new_text = text.replace(ANCHOR.encode(), (ITEM + ANCHOR).encode(), 1)
+    new_text = text
+    for anchor, replacement in EDITS:
+        count = new_text.count(anchor.encode())
+        if count != 1:
+            sys.exit(f"an anchor was found {count} times, not once: nothing changed\n  {anchor[:90]}")
+        new_text = new_text.replace(anchor.encode(), replacement.encode(), 1)
 
     entry["offset"] = str(len(data))
     entry["size"] = len(new_text)

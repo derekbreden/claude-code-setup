@@ -6,10 +6,11 @@ archived session restores it. Search sessions still finds archived sessions. The
 layout's right-click menu has Archive too. The Side tabs layout's right-click menu has none,
 and the Home list's Archive is stubbed out ("Session archiving is unavailable").
 
-`patch.py` adds the item to the Side tabs right-click menu, first in the list: Archive on a
-session that is not archived (archives it and closes its tab, as Cmd+Shift+S does), Unarchive
-on one that is. Both go through the service's `session.update` with `archived`, the call the
-command palette uses.
+`patch.py` puts Archive first in both right-click menus the Side tabs list has: the menu of an
+open tab (archiving it closes the tab, as Cmd+Shift+S does) and the menu of a recent session
+that is not open. On an archived session, one opened from Search sessions, the item reads
+Unarchive. It also makes the Home list's Archive button work. All of them go through the
+service's `session.update` with `archived`, the call the command palette uses.
 
 ## Apply
 
@@ -32,9 +33,9 @@ Open OpenCode from the Dock. The `.original` suffix keeps the saved copy from be
 
 ## What it changes
 
-- `Contents/Resources/app.asar`: the renderer script holding the session tab's menu gets the
-  item, appended as new bytes, with its index entry pointing at them and carrying their
-  SHA-256.
+- `Contents/Resources/app.asar`: the renderer script holding the session menus gets the item
+  (one component, beside the app's own "Mark as unread" item) and the Home button's call,
+  appended as new bytes, with its index entry pointing at them and carrying their SHA-256.
 - `Contents/Info.plist`: `ElectronAsarIntegrity`, the SHA-256 of app.asar's index, which the
   app checks at launch.
 - The app is signed again, ad hoc, on this Mac. It no longer carries OpenCode's own signature,
