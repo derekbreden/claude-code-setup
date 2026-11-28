@@ -14,8 +14,8 @@ service's `session.update` with `archived`, the call the command palette uses.
 
 ## Apply
 
-Quit OpenCode first. Its background service runs inside the app, so quitting stops any session
-that is running.
+Quit OpenCode first. On 27 November its background service (`opencode-cli serve --service`)
+kept running after the app quit, and the relaunched app picked it up again.
 
 ```sh
 python3 -I opencode/desktop-archive/patch.py /Applications/OpenCode.app /tmp/OpenCode-patched.app
